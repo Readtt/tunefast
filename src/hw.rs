@@ -34,10 +34,11 @@ mod platform {
     }
     pub fn print_text(_text: &str) {}
     pub fn open_task_manager() {}
+    pub fn end_processes(_pids: &[u32]) {}
 }
 
 #[cfg(windows)]
 #[path = "hw_windows.rs"]
 mod platform;
 
-pub use platform::{ask_helper, install_helper, on_ac, open_task_manager, print_text, read_system_info, sensor_thread};
+pub use platform::{ask_helper, end_processes, install_helper, on_ac, open_task_manager, print_text, read_system_info, sensor_thread};

@@ -355,6 +355,35 @@ pub fn triangle<'a>(open: bool) -> Element<'a, Message> {
     canvas::Canvas::new(Triangle { open }).width(Length::Fixed(16.0)).height(Length::Fixed(16.0)).into()
 }
 
+/// The STOP glyph (24 x 24): grey square, dark ring and slash, lighter on hover.
+pub struct StopGlyph {
+    pub hovered: bool,
+}
+
+impl canvas::Program<Message> for StopGlyph {
+    type State = ();
+
+    fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let ink = if self.hovered { c::GREY_DARK } else { c::AREA };
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), c::GREY80);
+        frame.stroke(&Path::rectangle(Point::new(0.5, 0.5), Size::new(bounds.width - 1.0, bounds.height - 1.0)), Stroke::default().with_width(1.0).with_color(theme::hex(0x707070)));
+        let center = Point::new(bounds.width / 2.0, bounds.height / 2.0);
+        frame.fill(&Path::circle(center, 8.0), ink);
+        frame.fill(&Path::circle(center, 7.0), c::GREY80);
+        let (d, _) = (7.5_f32 / std::f32::consts::SQRT_2, 0);
+        frame.stroke(
+            &Path::line(Point::new(center.x - d, center.y + d), Point::new(center.x + d, center.y - d)),
+            Stroke::default().with_width(2.0).with_color(ink),
+        );
+        vec![frame.into_geometry()]
+    }
+}
+
+pub fn stop_glyph<'a>(hovered: bool) -> Element<'a, Message> {
+    canvas::Canvas::new(StopGlyph { hovered }).width(Length::Fixed(24.0)).height(Length::Fixed(24.0)).into()
+}
+
 /// A box with a `width`-unit gradient border (the original's selected card).
 pub fn gradient_border<'a>(inner: Element<'a, Message>, fill: Color, width: f32, w: f32, h: f32) -> Element<'a, Message> {
     stack![

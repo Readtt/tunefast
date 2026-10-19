@@ -100,6 +100,20 @@ pub fn print_text(text: &str) {
     }
 }
 
+/// STOP in TOP PROCESSES: ends the listed processes, as the original does.
+pub fn end_processes(pids: &[u32]) {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+    for pid in pids {
+        unsafe {
+            if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, *pid) {
+                let _ = TerminateProcess(handle, 1);
+                let _ = CloseHandle(handle);
+            }
+        }
+    }
+}
+
 pub fn open_task_manager() {
     shell("open", "taskmgr.exe");
 }
@@ -582,7 +596,7 @@ impl ProcessSampler {
         );
         let cores = self.system.cpus().len().max(1) as f32;
         let cores = if cores <= 1.0 { std::thread::available_parallelism().map(|n| n.get() as f32).unwrap_or(1.0) } else { cores };
-        let mut groups: HashMap<String, (f32, f64, u64)> = HashMap::new();
+        let mut groups: HashMap<String, (f32, f64, u64, Vec<u32>)> = HashMap::new();
         for (pid, process) in self.system.processes() {
             let pid = pid.as_u32();
             if pid == self.own || pid <= 4 {
@@ -593,14 +607,15 @@ impl ProcessSampler {
                 continue; // system processes, not apps
             }
             let name = self.names.entry(exe.to_path_buf()).or_insert_with(|| describe(exe)).clone();
-            let entry = groups.entry(name).or_insert((0.0, 0.0, 0));
+            let entry = groups.entry(name).or_insert((0.0, 0.0, 0, Vec::new()));
             entry.0 += process.cpu_usage() / cores;
             entry.1 = entry.1.max(gpu.get(&pid).copied().unwrap_or(0.0));
             entry.2 += process.memory();
+            entry.3.push(pid);
         }
         let mut rows: Vec<Process> = groups
             .into_iter()
-            .map(|(name, (cpu, gpu, memory))| Process { name, cpu: cpu.round() as u32, gpu: gpu.round() as u32, ram_mb: (memory / 1_048_576) as u32 })
+            .map(|(name, (cpu, gpu, memory, pids))| Process { name, cpu: cpu.round() as u32, gpu: gpu.round() as u32, ram_mb: (memory / 1_048_576) as u32, pids })
             .collect();
         rows.sort_by(|a, b| b.cpu.cmp(&a.cpu).then(b.gpu.cmp(&a.gpu)).then(b.ram_mb.cmp(&a.ram_mb)));
         rows.truncate(4);

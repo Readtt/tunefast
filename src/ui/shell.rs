@@ -126,7 +126,15 @@ fn titlebar(app: &App, p: Palette) -> Element<'_, Message> {
             .style(theme::caption(p, close))
             .on_press(message)
     };
+    let gear = button(container(icon(Icon::Settings, 20.0, p.title_text)).center(Length::Fixed(size::TITLEBAR)))
+        .padding(0)
+        .width(Length::Fixed(44.0))
+        .height(Length::Fixed(size::TITLEBAR))
+        .style(theme::caption(p, false))
+        .on_press(Message::ToggleSettings);
     let controls = row![
+        gear,
+        space().width(Length::Fixed(48.0)),
         caption(Icon::Minimize, Message::Minimize, false),
         caption(if app.maximized { Icon::Restore } else { Icon::Maximize }, Message::ToggleMaximize, false),
         caption(Icon::Close, Message::CloseRequested, true),
@@ -147,25 +155,28 @@ fn titlebar(app: &App, p: Palette) -> Element<'_, Message> {
         .into()
 }
 
-/// The left menu: this laptop's group with its two pages, then Settings.
+/// The left menu. This laptop's group, its two pages and Settings sit where
+/// the original has its device group and HELP & FEEDBACK; the original's other
+/// entries (home, store, games, gallery, offers...) are left out, not moved up.
 fn menu<'a>(app: &'a App, p: Palette) -> Element<'a, Message> {
     let group = row![
-        space().width(Length::Fixed(18.0)),
+        space().width(Length::Fixed(20.0)),
         icon(Icon::Laptop, 20.0, p.menu_text),
         space().width(Length::Fixed(12.0)),
         t(app.store.device.clone(), 14.0, font::BOLD, p.menu_text),
         space().width(Length::Fill),
         icon(Icon::ChevronUp, 14.0, p.menu_text),
-        space().width(Length::Fixed(22.0)),
+        space().width(Length::Fixed(24.0)),
     ]
     .align_y(iced::Alignment::Center)
+    .width(Length::Fixed(size::MENU))
     .height(Length::Fixed(32.0));
     let vitals = sub_row("System Vitals", app.screen.is_vitals(), Message::Navigate(app.vitals_screen), p);
     let performance = sub_row("Performance Control", app.screen == Screen::Performance, Message::Navigate(Screen::Performance), p);
     let settings = press_row(
         move |hovered| {
             let line = row![
-                space().width(Length::Fixed(18.0)),
+                space().width(Length::Fixed(20.0)),
                 icon(Icon::Settings, 20.0, p.menu_text),
                 space().width(Length::Fixed(12.0)),
                 t("SETTINGS", 14.0, font::BOLD, p.menu_text),
@@ -176,23 +187,17 @@ fn menu<'a>(app: &'a App, p: Palette) -> Element<'a, Message> {
         },
         Message::ToggleSettings,
     );
-    let footer = row![space().width(Length::Fill), t(format!("{}", app.store.version), 12.0, font::BOOK, p.footer_text), space().width(Length::Fixed(16.0))]
-        .height(Length::Fixed(32.0))
-        .align_y(iced::Alignment::Center);
-    let items = column![
-        space().height(Length::Fixed(4.0)),
-        group,
-        space().height(Length::Fixed(2.0)),
-        vitals,
-        space().height(Length::Fixed(4.0)),
-        performance,
-        space().height(Length::Fixed(14.0)),
-        divider(p),
-        space().height(Length::Fixed(12.0)),
-        settings,
-        space().height(Length::Fill),
-        footer,
-    ];
+    let footer = container(t(app.store.version.clone(), 12.0, font::BOOK, p.footer_text))
+        .width(Length::Fixed(size::MENU - 16.0))
+        .align_x(iced::alignment::Horizontal::Right);
+    let items = Board::new(Length::Fixed(size::MENU), Length::Fill)
+        .at(0.0, 383.0, divider(p))
+        .at(0.0, 395.6, group)
+        .at(0.0, 430.0, vitals)
+        .at(0.0, 465.6, performance)
+        .at(0.0, 549.0, divider(p))
+        .at(0.0, 561.0, settings)
+        .push(container(footer).height(Length::Fill).align_y(iced::alignment::Vertical::Bottom).padding(iced::Padding { bottom: 9.0, ..iced::Padding::ZERO }));
     container(items)
         .width(Length::Fixed(size::MENU))
         .height(Length::Fill)
@@ -222,7 +227,7 @@ fn sub_row<'a>(label: &'a str, selected: bool, on_press: Message, p: Palette) ->
             } else {
                 space().width(Length::Fixed(6.0)).into()
             };
-            let line = row![indicator, space().width(Length::Fixed(56.0)), t(label, 14.0, font::BOOK, p.menu_text)]
+            let line = row![indicator, space().width(Length::Fixed(58.0)), t(label, 14.0, font::BOOK, p.menu_text)]
                 .align_y(iced::Alignment::Center)
                 .height(Length::Fixed(32.0));
             menu_fill(line.into(), selected || hovered, p)

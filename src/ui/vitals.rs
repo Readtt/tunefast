@@ -36,7 +36,7 @@ fn top_bar(app: &App, width: f32) -> Element<'_, Message> {
         let face = move |_hovered: bool| -> Element<'static, Message> {
             let tint = if selected { c::AREA } else { c::TEXT };
             let mut glyph_layer = Board::new(40.0, 40.0)
-                .push(rect(40.0, 40.0, if selected { c::TEXT } else { c::AREA }))
+                .push(rect(40.0, 40.0, if selected { c::TEXT } else { c::MODE_IDLE }))
                 .at(8.0, 8.0, icon(glyph, 24.0, tint));
             if gear {
                 glyph_layer = glyph_layer.at(22.0, 22.0, icon(Icon::Cog, 12.0, tint));
@@ -145,11 +145,8 @@ fn gauge_tile<'a>(
     let mut board = Board::new(290.0, 302.0)
         .at(18.0, 16.0, title(name))
         .at(55.0, 52.0, ring(util.unwrap_or(0.0) as f32, 180.0))
-        .at(55.0, 52.0, container(column![
-            t(percent, 50.0, font::BLACK, c::TEXT),
-            space().height(Length::Fixed(4.0)),
-            centred(t(caption, 14.0, font::BOOK, c::WHITE), 134.0),
-        ].align_x(iced::Alignment::Center)).center(Length::Fixed(180.0)));
+        .at(55.0, 91.6, centred(t(percent, 55.0, font::BLACK, c::TEXT), 180.0))
+        .at(78.0, 163.0, centred(t(caption, 14.0, font::BOOK, c::WHITE), 134.0));
     if let Some(temp) = temp {
         board = board
             .at(18.0, 236.0, t(format_temp(temp, fahrenheit), 26.0, font::BOLD, state_color(temp_state(temp))).line_height(iced::widget::text::LineHeight::Absolute(37.0.into())))
@@ -180,11 +177,8 @@ fn ram_tile(v: &Vitals) -> Element<'_, Message> {
     let board = Board::new(290.0, 302.0)
         .at(18.0, 16.0, title("RAM"))
         .at(55.0, 52.0, ring(util.unwrap_or(0.0) as f32, 180.0))
-        .at(55.0, 52.0, container(column![
-            t(percent, 50.0, font::BLACK, c::TEXT),
-            space().height(Length::Fixed(4.0)),
-            centred(t("RAM Utilization", 14.0, font::BOOK, c::WHITE), 134.0),
-        ].align_x(iced::Alignment::Center)).center(Length::Fixed(180.0)))
+        .at(55.0, 91.6, centred(t(percent, 55.0, font::BLACK, c::TEXT), 180.0))
+        .at(78.0, 163.0, centred(t("RAM Utilization", 14.0, font::BOOK, c::WHITE), 134.0))
         .at(18.0, 268.0, t(format!("{:.1}GB / {:.1}GB", v.ram_used_gb, v.ram_total_gb), 14.0, font::BOOK, c::TEXT));
     card(290.0, board.into())
 }
@@ -247,11 +241,10 @@ fn network_tile(v: &Vitals) -> Element<'_, Message> {
 }
 
 fn processes_tile(v: &Vitals) -> Element<'_, Message> {
-    // Columns 50/180/75/75/80 from x 10. The original's ACTION column (STOP
-    // buttons that end other programs) is left out: it is not a hardware control.
+    // Columns 50/180/75/75/80/100 from x 10; STOP ends the app's processes.
     let header = |text: &'static str, x: f32, width: f32| (x, centred(t(text, 14.0, font::MEDIUM, c::GREY80), width));
     let mut board = Board::new(590.0, 302.0).at(16.0, 16.0, title("TOP PROCESSES"));
-    for (x, cell) in [header("APPS", 10.0, 50.0), header("NAME", 60.0, 180.0), header("CPU", 240.0, 75.0), header("GPU", 315.0, 75.0), header("RAM", 390.0, 80.0)] {
+    for (x, cell) in [header("APPS", 10.0, 50.0), header("NAME", 60.0, 180.0), header("CPU", 240.0, 75.0), header("GPU", 315.0, 75.0), header("RAM", 390.0, 80.0), header("ACTION", 470.0, 100.0)] {
         board = board.at(x, 68.5, cell);
     }
     for (index, process) in v.processes.iter().take(4).enumerate() {
@@ -268,10 +261,19 @@ fn processes_tile(v: &Vitals) -> Element<'_, Message> {
             )
             .at(240.0, top, cell(format!("{}%", process.cpu), 75.0))
             .at(315.0, top, cell(format!("{}%", process.gpu), 75.0))
-            .at(390.0, top, cell(format!("{}MB", process.ram_mb), 80.0));
+            .at(390.0, top, cell(format!("{}MB", process.ram_mb), 80.0))
+            .at(508.0, top + 8.0, stop_button(process.pids.clone()));
     }
     let task_manager = mouse_area(t("Open Task Manager", 12.0, font::BOOK, c::HYPER_GREY))
         .on_press(Message::OpenTaskManager)
         .interaction(mouse::Interaction::Pointer);
     card(590.0, board.at(440.5, 275.0, task_manager).into())
+}
+
+/// The original's STOP button: a 24-unit #d8d8d8 square with a dark "no" sign.
+fn stop_button<'a>(pids: Vec<u32>) -> Element<'a, Message> {
+    crate::ui::widgets::press_row(
+        |hovered| crate::ui::widgets::stop_glyph(hovered),
+        Message::EndProcesses(pids),
+    )
 }

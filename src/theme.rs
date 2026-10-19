@@ -76,6 +76,8 @@ pub mod c {
     /// Performance Control's panel: #000000cc over the window.
     pub const PANEL: Color = hex(0x070707);
     pub const BASE: Color = hex(0x212121);
+    /// The System Vitals view buttons when not selected.
+    pub const MODE_IDLE: Color = hex(0x212121);
     pub const TINT: Color = hexa(0x000000, 0.80);
     pub const TEXT: Color = hex(0xEEEEEE);
     pub const WHITE: Color = hex(0xFFFFFF);
