@@ -112,7 +112,16 @@ impl App {
         let live = !args.demo;
         let mut settings = if live { crate::settings::load() } else { Settings::default() };
         let (mut store, last_screen) = if let Some(path) = &args.fixtures {
-            let store = std::fs::read_to_string(path)
+            // A reference captured at another window size showed other live
+            // numbers: `<id>@WxH.json` next to the fixture holds those.
+            let sized = args.size.map(|[w, h]| path.with_file_name(format!(
+                "{}@{}x{}.json",
+                path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
+                w as u32,
+                h as u32
+            )));
+            let path = sized.filter(|p| p.exists()).unwrap_or_else(|| path.clone());
+            let store = std::fs::read_to_string(&path)
                 .map_err(|e| e.to_string())
                 .and_then(|text| serde_json::from_str::<Store>(&text).map_err(|e| e.to_string()))
                 .unwrap_or_else(|error| {

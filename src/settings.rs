@@ -36,9 +36,30 @@ impl Default for Settings {
 pub struct EcoSaved {
     /// The internal display's refresh rate before ECO (None: not changed).
     pub refresh_hz: Option<u32>,
-    /// NVIDIA "Max Frame Rate" before ECO: None when ECO did not touch it,
-    /// Some(None) when it was not set (restoring deletes it), Some(Some(n)).
-    pub frame_cap: Option<Option<u32>>,
+    /// NVIDIA "Max Frame Rate" before ECO (None: ECO did not touch it).
+    pub frame_cap: Option<SavedCap>,
+}
+
+/// What the NVIDIA global frame cap was before ECO set it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SavedCap {
+    /// Not set in the global profile: leaving ECO deletes it again.
+    NotSet,
+    Fps(u32),
+}
+
+impl SavedCap {
+    pub fn from_cap(cap: Option<u32>) -> SavedCap {
+        cap.map_or(SavedCap::NotSet, SavedCap::Fps)
+    }
+
+    pub fn to_cap(self) -> Option<u32> {
+        match self {
+            SavedCap::NotSet => None,
+            SavedCap::Fps(fps) => Some(fps),
+        }
+    }
 }
 
 pub fn path() -> Option<PathBuf> {
@@ -79,7 +100,7 @@ mod tests {
         let settings = Settings {
             mode: Mode::Quiet,
             max_fan: true,
-            eco_saved: Some(EcoSaved { refresh_hz: Some(144), frame_cap: Some(None) }),
+            eco_saved: Some(EcoSaved { refresh_hz: Some(144), frame_cap: Some(SavedCap::NotSet) }),
             ..Settings::default()
         };
         let json = serde_json::to_string(&settings).unwrap();

@@ -6,7 +6,7 @@
 //! Default policy byte (tunefast_core::bios). ECO's Intel Turbo Boost switch
 //! is not reproduced: the original does it through its kernel driver.
 
-use crate::settings::EcoSaved;
+use crate::settings::{EcoSaved, SavedCap};
 
 /// Applies ECO and returns what it replaced. `previous` is a record left by
 /// an earlier ECO session that was never undone (kept, not overwritten).
@@ -23,7 +23,7 @@ pub fn enter(previous: Option<EcoSaved>) -> EcoSaved {
         if let Some(current) = platform::frame_cap() {
             let cap = tunefast_core::eco::eco_frame_cap(current.unwrap_or(0));
             if platform::set_frame_cap(Some(cap)) {
-                saved.frame_cap = Some(current);
+                saved.frame_cap = Some(SavedCap::from_cap(current));
             }
         }
     }
@@ -41,7 +41,7 @@ pub fn leave(saved: &EcoSaved) -> Option<EcoSaved> {
         }
     }
     if let Some(cap) = saved.frame_cap {
-        if !platform::set_frame_cap(cap) {
+        if !platform::set_frame_cap(cap.to_cap()) {
             left.frame_cap = Some(cap);
         }
     }
