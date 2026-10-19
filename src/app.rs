@@ -1,126 +1,115 @@
 //! Application state, messages and the update loop (the Elm architecture):
-//! views emit `Message`s, `update` changes state and returns `Task`s for
-//! async work, and nothing in the UI path blocks.
+//! views emit `Message`s, `update` changes state and returns `Task`s, and
+//! nothing in the UI path blocks: firmware requests, display changes and
+//! sensor reads run on background threads.
 //!
-//! Built to feel instant (the fast-rebuild skill's references/feel.md): the
-//! first frame draws the last session from a disk snapshot, rows act on
-//! mouse-down, hovering a row starts loading what it opens, sends show at once,
-//! the wheel scrolls as far per notch as Chromium does, the keyboard reaches
-//! everything, and a loading hint appears only after 300 ms of waiting.
+//! Built to feel instant (references/feel.md): tabs, menu rows and mode cards
+//! act on mouse-down, a chosen mode or fan setting shows at once and is
+//! confirmed in the background, the first frame draws the last session's
+//! numbers, and sensors run only while the window is open.
 
 use std::cell::Cell;
 use std::collections::HashSet;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use iced::widget::operation::{self, AbsoluteOffset};
-use iced::window::screenshot::Screenshot;
-use iced::{Element, Size, Subscription, Task, Theme, keyboard, window};
+use iced::{Element, Size, Subscription, Task, Theme, window};
+use tunefast_core::bios::{self, Mode};
+use tunefast_core::protocol::{Request, Response};
 
 use crate::args::{Args, ThemeChoice};
 use crate::cache::Snapshot;
-use crate::model::{Conversation, Message as ChatMessage, Store};
+use crate::hw::Reading;
+use crate::model::{HelperState, Store, SysInfo};
 use crate::screens::Screen;
-use crate::theme::{Palette, hex, size};
-use crate::ui::widgets::ids;
+use crate::settings::{EcoSaved, Settings};
+use crate::theme::{self, Palette, size};
 
-/// How long work may run before the interface admits it is waiting. Shorter
-/// waits show nothing: a hint that flashes for 100 ms reads as a glitch.
-pub const SLOW_AFTER: Duration = Duration::from_millis(300);
+/// The advanced view's collapsible sections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Section {
+    Cpu,
+    Gpu,
+    Ram,
+    Network,
+}
+
+/// What a background firmware request came back with.
+#[derive(Debug, Clone)]
+pub enum HelperResult {
+    Hello(bool),
+    MaxFan(Option<bool>),
+    ModeSet { mode: Mode, ok: bool },
+    MaxFanSet { on: bool, ok: bool },
+    Adapter { low_wattage: bool },
+}
 
 #[derive(Debug, Clone)]
 pub enum Message {
     Navigate(Screen),
-    Select(u64),
-    /// Moves the selection up or down the visible list (keyboard).
-    Step(i32),
-    /// The pointer entered a row: start loading what it opens.
-    Prefetch(u64),
-    Fetched(u64, Result<Vec<ChatMessage>, String>),
-    SlowLoad(u64),
-    SearchChanged(String),
-    FocusSearch,
-    Escape,
-    DraftChanged(String),
-    Send,
-    SetTheme(ThemeSetting),
-    Toggle(Setting, bool),
-    Loaded(Result<Store, String>),
-    Sent(Result<ChatMessage, String>),
+    SetMode(Mode),
+    SetMaxFan(bool),
+    SetAutoEco(bool),
+    SetFahrenheit(bool),
+    SetLight(bool),
+    ToggleSettings,
+    ToggleMenu,
+    ToggleSection(Section),
+    CopySysinfo,
+    PrintSysinfo,
+    OpenTaskManager,
+    EnableHelper,
+    Reading(Box<Reading>),
+    SysInfo(Box<SysInfo>),
+    Helper(HelperResult),
+    EcoApplied(Option<EcoSaved>),
+    PowerTick,
+    Power { on_ac: bool },
     Saved(Result<(), String>),
-    ListScrolled { offset: f32, height: f32 },
     Resized(Size),
+    Maximized(bool),
     DragWindow,
     ToggleMaximize,
     Minimize,
     CloseRequested,
     ResizeWindow(window::Direction),
-    ShotDue,
-    Shot(Screenshot),
-    SmokeStep(usize),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThemeSetting {
-    System,
-    Dark,
-    Light,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Setting {
-    Notifications,
-    Badge,
-    Autostart,
-}
-
-pub struct Settings {
-    pub theme: ThemeSetting,
-    pub notifications: bool,
-    pub badge: bool,
-    pub autostart: bool,
-}
-
-enum Tooling {
-    Off,
-    Screenshot { path: PathBuf },
-    Smoke { report: Option<PathBuf>, visited: Vec<&'static str> },
 }
 
 pub struct App {
     pub screen: Screen,
+    /// The System Vitals view the tab returns to (basic, advanced, info).
+    pub vitals_screen: Screen,
     pub store: Store,
-    pub selected: Option<u64>,
-    pub search: String,
-    pub draft: String,
     pub settings: Settings,
-    /// Scroll position and height of the conversation list, for drawing
-    /// only the rows that are visible.
-    pub list_offset: f32,
-    pub list_height: f32,
-    pub error: Option<String>,
-    /// A fetch that has run longer than SLOW_AFTER: the view shows a quiet hint.
-    pub slow: Option<u64>,
-    /// Conversations whose messages are in the store, and those on their way.
-    fetched: HashSet<u64>,
-    loading: HashSet<u64>,
-    /// Window size to reopen at (not updated while maximized).
-    window_size: Option<Size>,
-    maximized: bool,
-    /// Live runs keep a snapshot on disk; demo and tooling runs never touch it.
-    persist: bool,
-    tooling: Tooling,
-    /// Views built since start, logged on exit. An idle app builds none: a
-    /// count that keeps growing while nothing changes is a redraw loop.
+    pub collapsed: HashSet<Section>,
+    pub settings_open: bool,
+    /// Below the menu breakpoint the menu opens over the content.
+    pub menu_open: bool,
+    /// A short note under the mode cards (firmware refused, helper missing).
+    pub notice: Option<String>,
+    /// The user picked a mode while auto switch had ECO on: stay on it.
+    pub eco_overridden: bool,
+    pub on_ac: bool,
+    pub low_wattage: bool,
+    /// Window size in points, its scale (the original's rule) and the scale
+    /// iced last applied (resize events arrive in those units).
+    pub window_points: Size,
+    pub scale: f32,
+    applied_scale: Cell<f32>,
+    pub maximized: bool,
+    minimized: bool,
+    /// Live runs talk to the hardware; demo, fixtures and tooling never do.
+    live: bool,
+    /// Views built since start, logged on exit (an idle app builds none).
     renders: Cell<u64>,
     started: Instant,
 }
 
 impl App {
-    pub fn boot(args: Args, snapshot: Option<Snapshot>) -> (App, Task<Message>) {
+    pub fn boot(args: Args, snapshot: Option<Snapshot>, points: [f32; 2]) -> (App, Task<Message>) {
         let mut tasks = Vec::new();
-        let persist = !args.demo;
-        let (store, last_selected, last_screen) = if let Some(path) = &args.fixtures {
+        let live = !args.demo;
+        let mut settings = if live { crate::settings::load() } else { Settings::default() };
+        let (mut store, last_screen) = if let Some(path) = &args.fixtures {
             let store = std::fs::read_to_string(path)
                 .map_err(|e| e.to_string())
                 .and_then(|text| serde_json::from_str::<Store>(&text).map_err(|e| e.to_string()))
@@ -128,213 +117,185 @@ impl App {
                     log::error!("could not load fixtures {}: {error}", path.display());
                     crate::demo::store()
                 });
-            (store, None, None)
+            (store, None)
         } else if args.demo {
-            (crate::demo::store(), None, None)
+            (crate::demo::store(), None)
         } else {
-            // Draw the last session now; refresh it behind the scenes.
-            tasks.push(Task::perform(crate::backend::load(), Message::Loaded));
             match &snapshot {
-                Some(last) => (last.store.clone(), last.selected, Screen::from_id(&last.screen)),
-                None => (Store::default(), None, None),
+                Some(last) => (last.store.clone(), Screen::from_id(&last.screen)),
+                None => (Store::default(), None),
             }
         };
-        let fetched: HashSet<u64> = if args.demo {
-            store.conversations.iter().map(|c| c.id).collect()
+        if live {
+            store.controls.mode = settings.mode;
+            store.controls.max_fan = settings.max_fan;
+            store.controls.auto_eco = settings.auto_eco;
+            store.controls.helper = if cfg!(windows) { HelperState::Missing } else { HelperState::Unsupported };
+            store.fahrenheit = settings.fahrenheit;
+            store.version = env!("CARGO_PKG_VERSION").to_owned();
+            tasks.push(blocking(|| crate::hw::ask_helper(Request::Hello), |r| Message::Helper(HelperResult::Hello(r.ok))));
+            tasks.push(blocking(crate::hw::read_system_info, |info| Message::SysInfo(Box::new(info))));
+            tasks.push(Task::done(Message::PowerTick));
         } else {
-            store.messages.iter().map(|m| m.conversation).collect()
-        };
-        let tooling = if let Some(path) = &args.screenshot {
-            // Let fonts, images and layout settle, then capture.
-            let settle = Duration::from_millis(u64::from(args.settle_frames.max(2)) * 16);
-            tasks.push(Task::perform(tokio::time::sleep(settle), |_| Message::ShotDue));
-            Tooling::Screenshot { path: path.clone() }
-        } else if args.smoke {
-            tasks.push(Task::done(Message::SmokeStep(0)));
-            Tooling::Smoke { report: args.report.clone(), visited: Vec::new() }
-        } else {
-            Tooling::Off
-        };
-        if args.is_tooling() {
-            // Screenshots and smoke runs ignore the real mouse, so a cursor
-            // resting over the window cannot add hover states to a capture.
-            tasks.push(window::latest().and_then(window::enable_mouse_passthrough));
+            settings.fahrenheit = store.fahrenheit;
         }
-        let screen = args.screen.as_deref().and_then(Screen::from_id).or(last_screen).unwrap_or(Screen::Home);
-        let theme = match args.theme {
-            Some(ThemeChoice::Dark) => ThemeSetting::Dark,
-            Some(ThemeChoice::Light) => ThemeSetting::Light,
-            None => ThemeSetting::System,
-        };
-        let selected = if screen == Screen::Empty {
-            None
-        } else {
-            last_selected.filter(|id| store.conversation(*id).is_some()).or_else(|| store.conversations.first().map(|c| c.id))
-        };
+        if store.version.is_empty() {
+            store.version = env!("CARGO_PKG_VERSION").to_owned();
+        }
+        if store.device.is_empty() {
+            store.device = crate::model::device_label(&store.sysinfo.model);
+        }
+        match args.theme {
+            Some(ThemeChoice::Light) => settings.light = true,
+            Some(ThemeChoice::Dark) => settings.light = false,
+            None => {}
+        }
+        let screen = args.screen.as_deref().and_then(Screen::from_id).or(last_screen).unwrap_or(Screen::Performance);
+        let scale = theme::window_scale(points[0], points[1]);
         let app = App {
             screen,
-            selected,
+            vitals_screen: if screen.is_vitals() { screen } else { Screen::Vitals },
             store,
-            search: String::new(),
-            draft: String::new(),
-            settings: Settings { theme, notifications: true, badge: true, autostart: false },
-            list_offset: 0.0,
-            list_height: 800.0,
-            error: None,
-            slow: None,
-            fetched,
-            loading: HashSet::new(),
-            window_size: snapshot.as_ref().and_then(|s| s.window).map(|[w, h]| Size::new(w, h)),
-            maximized: snapshot.as_ref().is_some_and(|s| s.maximized),
-            persist,
-            tooling,
+            settings,
+            collapsed: HashSet::new(),
+            settings_open: false,
+            menu_open: false,
+            notice: None,
+            eco_overridden: false,
+            on_ac: true,
+            low_wattage: false,
+            window_points: Size::new(points[0], points[1]),
+            scale,
+            applied_scale: Cell::new(scale),
+            maximized: args.size.is_none() && snapshot.as_ref().is_none_or(|s| s.maximized),
+            minimized: false,
+            live,
             renders: Cell::new(0),
             started: Instant::now(),
         };
         (app, Task::batch(tasks))
     }
 
-    /// The conversations the list shows, filtered by the search box. The view
-    /// and keyboard navigation both use this, so they always agree.
-    pub fn rows(&self) -> Vec<&Conversation> {
-        let query = self.search.to_lowercase();
-        self.store.conversations.iter().filter(|c| query.is_empty() || c.title.to_lowercase().contains(&query)).collect()
-    }
-
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Navigate(screen) => {
                 self.screen = screen;
-                if screen == Screen::Empty {
-                    self.selected = None;
+                if screen.is_vitals() {
+                    self.vitals_screen = screen;
+                }
+                self.menu_open = false;
+                self.settings_open = false;
+            }
+            Message::SetMode(mode) => return self.set_mode(mode, false),
+            Message::SetMaxFan(on) => {
+                if self.store.controls.mode == Mode::Eco || !self.controls_ready() {
+                    return Task::none();
+                }
+                // Optimistic: the switch moves now; the firmware confirms.
+                self.store.controls.max_fan = on;
+                self.settings.max_fan = on;
+                return Task::batch([
+                    self.save_settings(),
+                    blocking(move || crate::hw::ask_helper(Request::SetMaxFan { on }), move |r| {
+                        Message::Helper(HelperResult::MaxFanSet { on, ok: r.ok && r.return_code == Some(0) })
+                    }),
+                ]);
+            }
+            Message::SetAutoEco(on) => {
+                self.store.controls.auto_eco = on;
+                self.settings.auto_eco = on;
+                self.eco_overridden = false;
+                let mut tasks = vec![self.save_settings()];
+                tasks.push(self.check_auto_eco());
+                return Task::batch(tasks);
+            }
+            Message::SetFahrenheit(on) => {
+                self.store.fahrenheit = on;
+                self.settings.fahrenheit = on;
+                return self.save_settings();
+            }
+            Message::SetLight(on) => {
+                self.settings.light = on;
+                return self.save_settings();
+            }
+            Message::ToggleSettings => self.settings_open = !self.settings_open,
+            Message::ToggleMenu => self.menu_open = !self.menu_open,
+            Message::ToggleSection(section) => {
+                if !self.collapsed.remove(&section) {
+                    self.collapsed.insert(section);
                 }
             }
-            Message::Select(id) => {
-                self.selected = Some(id);
-                self.screen = Screen::Home;
-                if let Some(c) = self.store.conversations.iter_mut().find(|c| c.id == id) {
-                    c.unread = 0;
+            Message::CopySysinfo => return iced::clipboard::write(sysinfo_text(&self.store.sysinfo)),
+            Message::PrintSysinfo => {
+                let text = sysinfo_text(&self.store.sysinfo);
+                return Task::perform(
+                    tokio::task::spawn_blocking(move || crate::hw::print_text(&text)),
+                    |_| Message::Saved(Ok(())),
+                );
+            }
+            Message::OpenTaskManager => crate::hw::open_task_manager(),
+            Message::EnableHelper => {
+                if self.live {
+                    return blocking(crate::hw::install_helper, |ok| Message::Helper(HelperResult::Hello(ok)));
                 }
-                // Ready to type at once, as in the original.
-                let mut tasks = vec![self.fetch(id), operation::focus(ids::COMPOSER)];
-                if self.loading.contains(&id) {
-                    // An async block: the timer is created when the task runs, on the runtime.
-                    tasks.push(Task::perform(async { tokio::time::sleep(SLOW_AFTER).await }, move |_| Message::SlowLoad(id)));
+            }
+            Message::Reading(reading) => {
+                let reading = *reading;
+                self.store.vitals = reading.vitals;
+                self.store.advanced = reading.advanced;
+                if reading.on_ac != self.on_ac {
+                    return self.update(Message::Power { on_ac: reading.on_ac });
                 }
-                // The neighbours too, so stepping through the list never waits.
-                let rows: Vec<u64> = self.rows().iter().map(|c| c.id).collect();
-                if let Some(index) = rows.iter().position(|row| *row == id) {
-                    for neighbour in [index.checked_sub(1), Some(index + 1)].into_iter().flatten() {
-                        if let Some(&neighbour) = rows.get(neighbour) {
-                            tasks.push(self.fetch(neighbour));
-                        }
-                    }
+            }
+            Message::SysInfo(info) => {
+                if self.store.device.is_empty() || self.store.device == "This Laptop" || self.store.sysinfo.model != info.model {
+                    self.store.device = crate::model::device_label(&info.model);
+                }
+                self.store.sysinfo = *info;
+            }
+            Message::Helper(result) => return self.helper_result(result),
+            Message::EcoApplied(saved) => {
+                self.settings.eco_saved = saved;
+                return self.save_settings();
+            }
+            Message::PowerTick => {
+                if self.live {
+                    return blocking(crate::hw::on_ac, |on_ac| Message::Power { on_ac });
+                }
+            }
+            Message::Power { on_ac } => {
+                let changed = on_ac != self.on_ac;
+                self.on_ac = on_ac;
+                if changed {
+                    self.eco_overridden = false;
+                }
+                let mut tasks = vec![self.check_auto_eco()];
+                if self.live && self.store.controls.helper == HelperState::Ready {
+                    tasks.push(blocking(
+                        || crate::hw::ask_helper(Request::GetAdapterStatus),
+                        |r: Response| Message::Helper(HelperResult::Adapter { low_wattage: r.ok && bios::adapter_status(&r.data).low_wattage() }),
+                    ));
                 }
                 return Task::batch(tasks);
             }
-            Message::Step(delta) => {
-                let rows: Vec<u64> = self.rows().iter().map(|c| c.id).collect();
-                if rows.is_empty() {
-                    return Task::none();
-                }
-                let next = match self.selected.and_then(|id| rows.iter().position(|row| *row == id)) {
-                    Some(index) => (index as i64 + i64::from(delta)).clamp(0, rows.len() as i64 - 1) as usize,
-                    None => 0,
-                };
-                let reveal = self.reveal_row(next);
-                let select = self.update(Message::Select(rows[next]));
-                return Task::batch([select, reveal]);
-            }
-            Message::Prefetch(id) => return self.fetch(id),
-            Message::Fetched(id, result) => {
-                self.loading.remove(&id);
-                if self.slow == Some(id) {
-                    self.slow = None;
-                }
-                match result {
-                    Ok(messages) => {
-                        self.fetched.insert(id);
-                        self.store.replace_messages(id, messages);
-                    }
-                    Err(error) => {
-                        log::warn!("loading conversation {id}: {error}");
-                        self.error = Some(error);
-                    }
-                }
-            }
-            Message::SlowLoad(id) => {
-                if self.loading.contains(&id) && self.selected == Some(id) {
-                    self.slow = Some(id);
-                }
-            }
-            Message::SearchChanged(text) => self.search = text,
-            Message::FocusSearch => return Task::batch([operation::focus(ids::SEARCH), operation::select_all(ids::SEARCH)]),
-            Message::Escape => {
-                if !self.search.is_empty() {
-                    self.search.clear();
-                } else if self.screen == Screen::Settings {
-                    self.screen = Screen::Home;
-                }
-            }
-            Message::DraftChanged(text) => self.draft = text,
-            Message::Send => {
-                let body = self.draft.trim().to_owned();
-                if let (Some(conversation), false) = (self.selected, body.is_empty()) {
-                    self.draft.clear();
-                    let id = self.store.next_message_id();
-                    // Optimistic: the message shows at once; the backend
-                    // confirms it behind the scenes.
-                    self.store.messages.push(ChatMessage {
-                        id,
-                        conversation,
-                        author: "You".to_owned(),
-                        body: body.clone(),
-                        time: "now".to_owned(),
-                        mine: true,
-                    });
-                    return Task::perform(crate::backend::send(conversation, body, id), Message::Sent);
-                }
-            }
-            Message::SetTheme(setting) => self.settings.theme = setting,
-            Message::Toggle(setting, value) => match setting {
-                Setting::Notifications => self.settings.notifications = value,
-                Setting::Badge => self.settings.badge = value,
-                Setting::Autostart => self.settings.autostart = value,
-            },
-            Message::Loaded(Ok(store)) => {
-                self.fetched.extend(store.messages.iter().map(|m| m.conversation));
-                self.selected = self
-                    .selected
-                    .filter(|id| store.conversation(*id).is_some())
-                    .or_else(|| (self.screen != Screen::Empty).then(|| store.conversations.first().map(|c| c.id)).flatten());
-                self.store = store;
-                if self.persist {
-                    return Task::perform(crate::cache::save(self.snapshot()), Message::Saved);
-                }
-            }
-            Message::Sent(Ok(message)) => {
-                if let Some(shown) = self.store.messages.iter_mut().find(|m| m.id == message.id) {
-                    *shown = message;
-                }
-            }
-            Message::Loaded(Err(error)) | Message::Sent(Err(error)) => {
-                log::warn!("backend: {error}");
-                self.error = Some(error);
-            }
             Message::Saved(result) => {
                 if let Err(error) = result {
-                    log::warn!("could not save the snapshot: {error}");
+                    log::warn!("could not save: {error}");
                 }
-            }
-            Message::ListScrolled { offset, height } => {
-                self.list_offset = offset;
-                self.list_height = height;
             }
             Message::Resized(size) => {
-                if !self.maximized {
-                    self.window_size = Some(size);
+                if size.width <= 1.0 || size.height <= 1.0 {
+                    // Minimized: the sensor subscription stops with this.
+                    self.minimized = true;
+                    return Task::none();
                 }
+                self.minimized = false;
+                let applied = self.applied_scale.get();
+                self.window_points = Size::new(size.width * applied, size.height * applied);
+                self.scale = theme::window_scale(self.window_points.width, self.window_points.height);
+                return window::latest().and_then(window::is_maximized).map(Message::Maximized);
             }
+            Message::Maximized(maximized) => self.maximized = maximized,
             Message::DragWindow => return window::latest().and_then(window::drag),
             Message::ToggleMaximize => {
                 self.maximized = !self.maximized;
@@ -345,9 +306,12 @@ impl App {
                 return window::latest().and_then(move |id| window::drag_resize(id, direction));
             }
             Message::CloseRequested => {
-                if self.persist {
+                if self.live {
                     if let Err(error) = crate::cache::save_now(self.snapshot()) {
                         log::warn!("could not save the snapshot: {error}");
+                    }
+                    if let Err(error) = crate::settings::save_now(&self.settings) {
+                        log::warn!("could not save settings: {error}");
                     }
                 }
                 let seconds = self.started.elapsed().as_secs_f32();
@@ -355,90 +319,133 @@ impl App {
                 println!("FRAMES {} in {seconds:.1} s", self.renders.get());
                 return iced::exit();
             }
-            Message::ShotDue => {
-                return window::latest().and_then(window::screenshot).map(Message::Shot);
+        }
+        Task::none()
+    }
+
+    /// Modes and the fan switch work once the helper answers (and always in demo runs).
+    pub fn controls_ready(&self) -> bool {
+        self.store.controls.helper == HelperState::Ready
+    }
+
+    fn set_mode(&mut self, mode: Mode, automatic: bool) -> Task<Message> {
+        if !self.controls_ready() {
+            self.notice = Some("Turn on hardware control to change modes.".to_owned());
+            return Task::none();
+        }
+        let previous = self.store.controls.mode;
+        let was_auto = self.store.controls.auto_eco_active;
+        if automatic {
+            self.store.controls.auto_eco_active = mode == Mode::Eco;
+        } else {
+            // A choice made while auto switch holds ECO overrides it until power changes.
+            self.eco_overridden = was_auto;
+            self.store.controls.auto_eco_active = false;
+            self.settings.mode = mode;
+        }
+        self.store.controls.mode = mode;
+        self.notice = None;
+        if mode == Mode::Eco {
+            self.store.controls.max_fan = false;
+        }
+        if !self.live {
+            return Task::none();
+        }
+        let mut tasks = vec![self.save_settings()];
+        tasks.push(blocking(move || crate::hw::ask_helper(Request::SetMode { mode }), move |r| {
+            Message::Helper(HelperResult::ModeSet { mode, ok: r.ok && r.return_code == Some(0) })
+        }));
+        // ECO's Windows side: 60 Hz and the NVIDIA cap on entry, put back on exit.
+        if mode == Mode::Eco && previous != Mode::Eco {
+            let saved = self.settings.eco_saved.clone();
+            tasks.push(blocking(move || Some(crate::eco::enter(saved)), Message::EcoApplied));
+            if self.settings.max_fan {
+                tasks.push(blocking(|| crate::hw::ask_helper(Request::SetMaxFan { on: false }), |_| Message::Saved(Ok(()))));
             }
-            Message::Shot(shot) => {
-                if let Tooling::Screenshot { path } = &self.tooling {
-                    if let Some(parent) = path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    let (w, h) = (shot.size.width, shot.size.height);
-                    match image::RgbaImage::from_raw(w, h, shot.rgba.to_vec()).map(|img| img.save(path)) {
-                        Some(Ok(())) => println!("SCREENSHOT {w}x{h} {}", path.display()),
-                        _ => {
-                            log::error!("could not write {}", path.display());
-                            std::process::exit(4);
-                        }
-                    }
+        } else if mode != Mode::Eco && previous == Mode::Eco {
+            if let Some(saved) = self.settings.eco_saved.clone() {
+                tasks.push(blocking(move || crate::eco::leave(&saved), Message::EcoApplied));
+            }
+            if self.settings.max_fan {
+                tasks.push(blocking(|| crate::hw::ask_helper(Request::SetMaxFan { on: true }), |_| Message::Saved(Ok(()))));
+                self.store.controls.max_fan = true;
+            }
+        }
+        Task::batch(tasks)
+    }
+
+    fn check_auto_eco(&mut self) -> Task<Message> {
+        if !self.live || !self.controls_ready() {
+            return Task::none();
+        }
+        let c = &self.store.controls;
+        let want = tunefast_core::eco::should_auto_switch(c.auto_eco, self.on_ac, self.low_wattage, self.eco_overridden);
+        if want && !c.auto_eco_active && c.mode != Mode::Eco {
+            return self.set_mode(Mode::Eco, true);
+        }
+        if !want && c.auto_eco_active {
+            let back = self.settings.mode;
+            self.store.controls.auto_eco_active = false;
+            return self.set_mode(back, true);
+        }
+        Task::none()
+    }
+
+    fn helper_result(&mut self, result: HelperResult) -> Task<Message> {
+        match result {
+            HelperResult::Hello(ok) => {
+                self.store.controls.helper = if ok { HelperState::Ready } else { HelperState::Missing };
+                if ok {
+                    self.notice = None;
+                    return Task::batch([
+                        blocking(|| crate::hw::ask_helper(Request::GetMaxFan), |r: Response| {
+                            Message::Helper(HelperResult::MaxFan(r.ok.then(|| bios::max_fan_on(&r.data))))
+                        }),
+                        Task::done(Message::PowerTick),
+                    ]);
                 }
-                return iced::exit();
             }
-            Message::SmokeStep(index) => {
-                if let Tooling::Smoke { report, visited } = &mut self.tooling {
-                    if let Some(screen) = Screen::ALL.get(index) {
-                        self.screen = *screen;
-                        self.selected = if *screen == Screen::Empty {
-                            None
-                        } else {
-                            self.selected.or_else(|| self.store.conversations.first().map(|c| c.id))
-                        };
-                        visited.push(screen.id());
-                        return Task::perform(tokio::time::sleep(Duration::from_millis(150)), move |_| {
-                            Message::SmokeStep(index + 1)
-                        });
-                    }
-                    let json = serde_json::json!({
-                        "ok": true,
-                        "detail": "ok",
-                        "visited": visited,
-                        "expected": Screen::ALL.iter().map(|s| s.id()).collect::<Vec<_>>(),
-                        "version": env!("CARGO_PKG_VERSION"),
-                    });
-                    if let Some(path) = report {
-                        if let Some(parent) = path.parent() {
-                            let _ = std::fs::create_dir_all(parent);
-                        }
-                        let _ = std::fs::write(path, json.to_string());
-                    }
-                    println!("SMOKE OK {} screens: {}", visited.len(), visited.join(", "));
-                    return iced::exit();
+            HelperResult::MaxFan(Some(on)) => {
+                self.store.controls.max_fan = on;
+                self.settings.max_fan = on;
+            }
+            HelperResult::MaxFan(None) => {}
+            HelperResult::ModeSet { mode, ok } => {
+                if !ok && self.store.controls.mode == mode {
+                    self.notice = Some(format!("The firmware did not accept {}.", mode.name()));
+                }
+            }
+            HelperResult::MaxFanSet { on, ok } => {
+                if !ok && self.store.controls.max_fan == on {
+                    // Never let a late failure undo a newer choice; this one failed, so show the truth.
+                    self.store.controls.max_fan = !on;
+                    self.settings.max_fan = !on;
+                    self.notice = Some("The fan setting was not accepted.".to_owned());
+                }
+            }
+            HelperResult::Adapter { low_wattage } => {
+                if low_wattage != self.low_wattage {
+                    self.low_wattage = low_wattage;
+                    return self.check_auto_eco();
                 }
             }
         }
         Task::none()
     }
 
-    /// Starts loading a conversation's messages unless they are here or on their way.
-    fn fetch(&mut self, id: u64) -> Task<Message> {
-        if self.fetched.contains(&id) || !self.loading.insert(id) {
+    fn save_settings(&self) -> Task<Message> {
+        if !self.live {
             return Task::none();
         }
-        Task::perform(crate::backend::messages(id), move |result| Message::Fetched(id, result))
-    }
-
-    /// Scrolls the list just enough to show row `index`.
-    fn reveal_row(&mut self, index: usize) -> Task<Message> {
-        let top = index as f32 * size::LIST_ROW;
-        let bottom = top + size::LIST_ROW;
-        let offset = if top < self.list_offset {
-            top
-        } else if bottom > self.list_offset + self.list_height {
-            bottom - self.list_height
-        } else {
-            return Task::none();
-        };
-        self.list_offset = offset.max(0.0);
-        operation::scroll_to(ids::LIST, AbsoluteOffset { x: 0.0, y: self.list_offset })
+        Task::perform(crate::settings::save(self.settings.clone()), Message::Saved)
     }
 
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             version: 0,
             store: self.store.clone(),
-            selected: self.selected,
             screen: self.screen.id().to_owned(),
-            window: self.window_size.map(|size| [size.width, size.height]),
+            window: (!self.maximized).then_some([self.window_points.width, self.window_points.height]),
             maximized: self.maximized,
         }
     }
@@ -449,176 +456,191 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        Subscription::batch([
+        let mut subscriptions = vec![
             // The OS close button and Alt+F4 come here (exit_on_close_request is off).
             window::close_requests().map(|_| Message::CloseRequested),
             window::resize_events().map(|(_, size)| Message::Resized(size)),
-            keyboard::listen().filter_map(shortcut),
-        ])
+        ];
+        // Sensors are read only while the window is open (not minimized), as
+        // the original reads them only while its pages are visible.
+        if self.live && !self.minimized {
+            subscriptions.push(Subscription::run(sensor_stream));
+        }
+        // Auto switch to ECO follows the power source even while minimized.
+        if self.live && self.store.controls.auto_eco {
+            subscriptions.push(iced::time::every(Duration::from_secs(5)).map(|_| Message::PowerTick));
+        }
+        Subscription::batch(subscriptions)
     }
 
     pub fn title(&self) -> String {
         crate::APP_NAME.to_owned()
     }
 
-    pub fn palette(&self) -> Palette {
-        match self.settings.theme {
-            ThemeSetting::Light => Palette::LIGHT,
-            // System follows dark here; read the OS setting if the original does.
-            ThemeSetting::Dark | ThemeSetting::System => Palette::DARK,
-        }
+    /// The original's whole-window scale; iced lays the views out on the
+    /// design canvas and multiplies by this.
+    pub fn scale_factor(&self) -> f32 {
+        self.applied_scale.set(self.scale);
+        self.scale
     }
 
-    /// The built-in widgets (toggles, inputs) take their colours from this.
+    pub fn palette(&self) -> Palette {
+        if self.settings.light { Palette::LIGHT } else { Palette::DARK }
+    }
+
+    /// Whether the left menu is docked (window at least 974.4 points wide).
+    pub fn menu_docked(&self) -> bool {
+        self.window_points.width >= size::MENU_BREAKPOINT
+    }
+
     pub fn theme(&self) -> Theme {
-        let p = self.palette();
         Theme::custom(
             "Tunefast",
             iced::theme::Palette {
-                background: p.window,
-                text: p.text,
-                primary: p.accent,
-                success: p.positive,
-                warning: hex(0xF5A524),
-                danger: p.danger,
+                background: theme::c::WINDOW,
+                text: theme::c::TEXT,
+                primary: theme::c::BLUE,
+                success: theme::c::NORMAL,
+                warning: theme::c::WARNING,
+                danger: theme::c::HOT,
             },
         )
     }
 
     pub fn style(&self, _theme: &Theme) -> iced::theme::Style {
-        let p = self.palette();
-        iced::theme::Style { background_color: p.window, text_color: p.text }
+        iced::theme::Style { background_color: theme::c::WINDOW, text_color: theme::c::TEXT }
     }
 }
 
-/// Keyboard shortcuts. `keyboard::listen` only reports keys no widget used,
-/// so typing in a field never triggers one. Replace these with the
-/// original's shortcuts (recon/rea-digest.md lists them).
-fn shortcut(event: keyboard::Event) -> Option<Message> {
-    use keyboard::key::Named;
-    let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
-        return None;
-    };
-    match key.as_ref() {
-        keyboard::Key::Character("k") if modifiers.command() => Some(Message::FocusSearch),
-        keyboard::Key::Character(",") if modifiers.command() => Some(Message::Navigate(Screen::Settings)),
-        keyboard::Key::Named(Named::ArrowUp) if modifiers.alt() => Some(Message::Step(-1)),
-        keyboard::Key::Named(Named::ArrowDown) if modifiers.alt() => Some(Message::Step(1)),
-        keyboard::Key::Named(Named::Escape) => Some(Message::Escape),
-        _ => None,
+/// Runs blocking work (a firmware request, a display change) off the UI thread.
+fn blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static, done: impl Fn(T) -> Message + Send + 'static) -> Task<Message> {
+    Task::perform(async move { tokio::task::spawn_blocking(work).await }, move |result| match result {
+        Ok(value) => done(value),
+        Err(error) => Message::Saved(Err(error.to_string())),
+    })
+}
+
+/// One reading a second from the sensor thread, for as long as the
+/// subscription lives (the thread stops when the receiver is dropped).
+fn sensor_stream() -> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::SinkExt;
+    iced::stream::channel(4, async |mut output: iced::futures::channel::mpsc::Sender<Message>| {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        std::thread::spawn(move || crate::hw::sensor_thread(tx));
+        while let Some(reading) = rx.recv().await {
+            if output.send(Message::Reading(Box::new(reading))).await.is_err() {
+                break;
+            }
+        }
+    })
+}
+
+/// The text COPY TO CLIPBOARD and PRINT produce, in the original's order.
+pub fn sysinfo_text(info: &SysInfo) -> String {
+    let mut lines = vec![
+        "MODEL".to_owned(),
+        format!("    {}", info.model),
+        "SERIAL NUMBER".to_owned(),
+        format!("    {}", info.serial),
+        "OPERATING SYSTEM".to_owned(),
+        format!("    {}", info.os_name),
+        format!("        - Release ID: {}", info.os_release),
+        format!("        - Version: {}", info.os_version),
+        format!("        - Build: {}", info.os_build),
+        "CPU".to_owned(),
+        format!("    {}", info.cpu_name),
+        format!("        - Clock speed: {}MHz", info.cpu_clock_mhz),
+        format!("        - Description: {}", info.cpu_description),
+        "GPU".to_owned(),
+    ];
+    for gpu in &info.gpus {
+        lines.push(format!("    {}", gpu.name));
+        if let Some(hz) = gpu.refresh_hz {
+            lines.push(format!("        - Refresh rate: {hz}Hz"));
+        }
+        lines.push(format!("        - Driver version: {}", gpu.driver));
     }
+    lines.push("RAM".to_owned());
+    for module in &info.memory {
+        lines.push(format!("    {}", module.part.trim()));
+        lines.push(format!("        - Capacity: {}GB", module.capacity_gb));
+        lines.push(format!("        - Type: {}", module.kind));
+        lines.push(format!("        - Default clock speed: {}MHz", module.speed_mhz));
+    }
+    lines.push("AUDIO".to_owned());
+    lines.extend(info.audio.iter().map(|a| format!("    {a}")));
+    lines.join("\r\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::widgets;
-    use clap::Parser;
 
     fn app() -> App {
-        App::boot(Args::parse_from(["tunefast", "--demo"]).normalized(), None).0
+        let args = <Args as clap::Parser>::parse_from(["tunefast", "--demo"]).normalized();
+        App::boot(args, None, [1280.0, 800.0]).0
     }
 
-    fn key(name: keyboard::Key, modifiers: keyboard::Modifiers) -> keyboard::Event {
-        keyboard::Event::KeyPressed {
-            key: name.clone(),
-            modified_key: name,
-            physical_key: keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified),
-            location: keyboard::Location::Standard,
-            modifiers,
-            text: None,
-            repeat: false,
+    #[test]
+    fn choosing_a_mode_shows_at_once_and_eco_turns_max_fan_off() {
+        let mut app = app();
+        app.store.controls.max_fan = true;
+        let _ = app.update(Message::SetMode(Mode::Performance));
+        assert_eq!(app.store.controls.mode, Mode::Performance);
+        assert!(app.store.controls.max_fan);
+        let _ = app.update(Message::SetMode(Mode::Eco));
+        assert_eq!(app.store.controls.mode, Mode::Eco);
+        assert!(!app.store.controls.max_fan, "ECO disables max fan, as in the original");
+        let _ = app.update(Message::SetMaxFan(true));
+        assert!(!app.store.controls.max_fan, "the fan switch is disabled in ECO");
+    }
+
+    #[test]
+    fn modes_need_the_helper() {
+        let mut app = app();
+        app.store.controls.helper = HelperState::Missing;
+        let _ = app.update(Message::SetMode(Mode::Quiet));
+        assert_eq!(app.store.controls.mode, Mode::Default);
+        assert!(app.notice.is_some());
+    }
+
+    #[test]
+    fn a_failed_fan_write_shows_the_real_state_but_a_newer_choice_wins() {
+        let mut app = app();
+        let _ = app.update(Message::SetMaxFan(true));
+        let _ = app.update(Message::SetMaxFan(false));
+        // The first write's late failure must not undo the newer choice.
+        let _ = app.update(Message::Helper(HelperResult::MaxFanSet { on: true, ok: false }));
+        assert!(!app.store.controls.max_fan);
+        let _ = app.update(Message::Helper(HelperResult::MaxFanSet { on: false, ok: false }));
+        assert!(app.store.controls.max_fan, "a failed write shows what the firmware still has");
+    }
+
+    #[test]
+    fn tabs_remember_the_vitals_view() {
+        let mut app = app();
+        let _ = app.update(Message::Navigate(Screen::VitalsAdvanced));
+        let _ = app.update(Message::Navigate(Screen::Performance));
+        assert_eq!(app.vitals_screen, Screen::VitalsAdvanced);
+    }
+
+    #[test]
+    fn resizing_follows_the_original_scale_and_breakpoint() {
+        let mut app = app();
+        app.applied_scale.set(0.6);
+        let _ = app.update(Message::Resized(Size::new(1600.0, 1066.67)));
+        assert!((app.window_points.width - 960.0).abs() < 0.5);
+        assert_eq!(app.scale, 0.6);
+        assert!(!app.menu_docked());
+        let _ = app.update(Message::Resized(Size::new(0.0, 0.0)));
+        assert!(app.minimized, "a minimized window stops the sensors");
+    }
+
+    #[test]
+    fn sysinfo_text_lists_every_section() {
+        let text = sysinfo_text(&crate::demo::store().sysinfo);
+        for heading in ["MODEL", "SERIAL NUMBER", "OPERATING SYSTEM", "CPU", "GPU", "RAM", "AUDIO"] {
+            assert!(text.contains(heading), "{heading}");
         }
-    }
-
-    #[test]
-    fn sending_shows_the_message_at_once_and_clears_the_draft() {
-        let mut app = app();
-        let before = app.store.messages_of(1).count();
-        app.draft = "  hello  ".to_owned();
-        let _ = app.update(Message::Send);
-        assert_eq!(app.store.messages_of(1).count(), before + 1);
-        assert_eq!(app.store.messages_of(1).last().map(|m| m.body.as_str()), Some("hello"));
-        assert!(app.draft.is_empty());
-    }
-
-    #[test]
-    fn selecting_clears_unread() {
-        let mut app = app();
-        let id = app.store.conversations.iter().find(|c| c.unread > 0).map(|c| c.id).expect("an unread row");
-        let _ = app.update(Message::Select(id));
-        assert_eq!(app.selected, Some(id));
-        assert_eq!(app.store.conversation(id).map(|c| c.unread), Some(0));
-    }
-
-    #[test]
-    fn stepping_moves_the_selection_and_stops_at_the_ends() {
-        let mut app = app();
-        let ids: Vec<u64> = app.rows().iter().map(|c| c.id).collect();
-        let _ = app.update(Message::Select(ids[0]));
-        let _ = app.update(Message::Step(1));
-        assert_eq!(app.selected, Some(ids[1]));
-        let _ = app.update(Message::Step(-5));
-        assert_eq!(app.selected, Some(ids[0]));
-    }
-
-    #[test]
-    fn stepping_follows_the_search_filter() {
-        let mut app = app();
-        let target = app.store.conversations[3].clone();
-        app.search = target.title.clone();
-        let _ = app.update(Message::Step(1));
-        assert_eq!(app.selected, Some(target.id));
-    }
-
-    #[test]
-    fn a_wheel_notch_scrolls_as_far_as_in_chromium() {
-        let notch = widgets::scaled_delta(iced::mouse::ScrollDelta::Lines { x: 0.0, y: -1.0 });
-        assert_eq!(notch, iced::mouse::ScrollDelta::Pixels { x: 0.0, y: -widgets::wheel_notch_px() });
-        let touchpad = iced::mouse::ScrollDelta::Pixels { x: 0.0, y: 12.5 };
-        assert_eq!(widgets::scaled_delta(touchpad), touchpad);
-    }
-
-    #[test]
-    fn hovering_loaded_rows_starts_no_work() {
-        let mut app = app();
-        let id = app.store.conversations[0].id;
-        assert_eq!(app.update(Message::Prefetch(id)).units(), 0);
-    }
-
-    #[test]
-    fn opening_a_conversation_also_loads_its_neighbours() {
-        let mut app = app();
-        app.fetched.clear();
-        let ids: Vec<u64> = app.rows().iter().map(|c| c.id).collect();
-        let _ = app.update(Message::Select(ids[2]));
-        assert!([ids[1], ids[2], ids[3]].iter().all(|id| app.loading.contains(id)));
-        assert!(!app.loading.contains(&ids[0]) && !app.loading.contains(&ids[4]));
-    }
-
-    #[test]
-    fn a_slow_load_shows_a_hint_only_while_it_is_still_loading() {
-        let mut app = app();
-        let id = 9_999;
-        app.fetched.remove(&id);
-        assert!(app.fetch(id).units() > 0);
-        app.selected = Some(id);
-        let _ = app.update(Message::SlowLoad(id));
-        assert_eq!(app.slow, Some(id));
-        let _ = app.update(Message::Fetched(id, Ok(Vec::new())));
-        assert_eq!(app.slow, None);
-        let _ = app.update(Message::SlowLoad(id));
-        assert_eq!(app.slow, None);
-    }
-
-    #[test]
-    fn shortcuts_map_to_actions() {
-        let ctrl = keyboard::Modifiers::COMMAND;
-        assert!(matches!(shortcut(key(keyboard::Key::Character("k".into()), ctrl)), Some(Message::FocusSearch)));
-        assert!(matches!(
-            shortcut(key(keyboard::Key::Named(keyboard::key::Named::ArrowDown), keyboard::Modifiers::ALT)),
-            Some(Message::Step(1))
-        ));
-        assert!(shortcut(key(keyboard::Key::Character("k".into()), keyboard::Modifiers::empty())).is_none());
     }
 }

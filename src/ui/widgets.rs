@@ -1,66 +1,45 @@
-//! Small shared widgets. Each takes its colours and sizes from `theme`, so
-//! restyling the app is a token change.
+//! Shared widgets: press-to-select rows, the wheel distance of the original,
+//! and the original's controls drawn natively (utilisation ring, history
+//! chart, pill toggle, AUTO/MAX slider, F/C switch, gradient border).
 
 use std::sync::OnceLock;
-
-use std::time::Duration;
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{Operation, Tree, tree};
 use iced::advanced::{Clipboard, Shell, Widget, overlay, renderer};
-use iced::time::Instant;
-use iced::widget::{button, container, hover, mouse_area, pin, rule, stack, text};
-use iced::{Alignment, Color, Element, Event, Length, Rectangle, Renderer, Size, Theme, Vector, mouse, window};
+use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke, path::Arc};
+use iced::widget::{container, hover, mouse_area, stack, svg, text};
+use iced::{Color, Element, Event, Length, Point, Radians, Rectangle, Renderer, Size, Theme, Vector, mouse};
 
 use crate::app::Message;
 use crate::icons::Icon;
-use crate::theme::{self, Palette, font, radius, size};
+use crate::theme::{self, c, font};
 
-/// Widget ids for focus and scroll operations (`iced::widget::operation`).
-pub mod ids {
-    pub const SEARCH: &str = "search";
-    pub const COMPOSER: &str = "composer";
-    pub const LIST: &str = "list";
-    pub const LOG: &str = "log";
+/// A row, tab or menu item that acts the moment the mouse button goes down,
+/// as native lists and tabs do (iced's `button` acts on release, 80-120 ms
+/// later). `build(hovered)` draws either state.
+pub fn press_row<'a>(build: impl Fn(bool) -> Element<'a, Message>, on_press: Message) -> Element<'a, Message> {
+    mouse_area(hover(build(false), build(true))).on_press(on_press).interaction(mouse::Interaction::Pointer).into()
 }
 
-/// A row that acts the moment the mouse button goes down, as native lists,
-/// tabs and sidebars do. iced's `button` acts on release, which in a normal
-/// click comes 80-120 ms later; keep `button` for actions a person may want to
-/// abandon by dragging off (Send, Delete, Leave). `build(hovered)` draws the
-/// row in either state. `on_enter` runs when the pointer arrives: use it to
-/// start loading what the row opens, so it is ready when the click lands.
-pub fn press_row<'a>(build: impl Fn(bool) -> Element<'a, Message>, on_press: Message, on_enter: Option<Message>) -> Element<'a, Message> {
-    let area = mouse_area(hover(build(false), build(true))).on_press(on_press).interaction(mouse::Interaction::Pointer);
-    match on_enter {
-        Some(message) => area.on_enter(message).into(),
-        None => area.into(),
-    }
+/// An SVG icon tinted with `color`, `size` design units square.
+pub fn icon<'a>(icon: Icon, size: f32, color: Color) -> Element<'a, Message> {
+    svg(svg::Handle::from_memory(icon.bytes()))
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .style(move |_, _| svg::Style { color: Some(color) })
+        .into()
 }
 
-/// Wraps a scrollable so one mouse-wheel notch scrolls `wheel_notch_px()`
-/// (Chromium's 100 px) instead of iced's fixed 60, and eases it the way
-/// Chromium does: part of the distance lands in the frame the wheel moved,
-/// the rest settles in about 150 ms, so fast scrolling moves every frame
-/// instead of jumping once per notch. It feeds pixel deltas to the scrollable,
-/// so iced's own scrolling stays in charge: no message and no view rebuild per
-/// notch, and `on_scroll` keeps firing for virtualized lists. Touchpad (pixel)
-/// deltas pass through untouched.
+// ------------------------------------------------------------------- wheel
+
+/// Wraps a scrollable so one wheel notch moves as far as in the original: a
+/// WPF ScrollViewer scrolls 16 DIPs per line, 3 lines per notch by default
+/// (48 design units), at once, without easing.
 pub fn wheel_scale<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
     Element::new(WheelScale { content: content.into() })
 }
 
-/// Ease each notch (Chromium, Edge, Firefox and WinUI do). Set to false when
-/// the original jumps a whole notch at once.
-pub const SMOOTH_WHEEL: bool = true;
-/// Time constant of the ease: 95% of a notch has landed after 3x this.
-const WHEEL_EASE: Duration = Duration::from_millis(30);
-/// Share of a notch applied in the frame the wheel moved.
-const WHEEL_FIRST_STEP: f32 = 0.3;
-/// Pace of the animation frames (about one 144 Hz frame), so it never spins.
-const WHEEL_FRAME: Duration = Duration::from_millis(7);
-
-/// The delta a scrollable should see for one wheel event, without easing.
 pub fn scaled_delta(delta: mouse::ScrollDelta) -> mouse::ScrollDelta {
     match delta {
         mouse::ScrollDelta::Lines { x, y } => {
@@ -71,28 +50,13 @@ pub fn scaled_delta(delta: mouse::ScrollDelta) -> mouse::ScrollDelta {
     }
 }
 
-fn wheel_event(pixels: Vector) -> Event {
-    Event::Mouse(mouse::Event::WheelScrolled { delta: mouse::ScrollDelta::Pixels { x: pixels.x, y: pixels.y } })
-}
-
-/// Distance still to scroll and when the last step was applied.
-#[derive(Default)]
-struct WheelState {
-    pending: Vector,
-    last: Option<Instant>,
-}
-
 struct WheelScale<'a> {
     content: Element<'a, Message>,
 }
 
 impl Widget<Message, Theme, Renderer> for WheelScale<'_> {
     fn tag(&self) -> tree::Tag {
-        tree::Tag::of::<WheelState>()
-    }
-
-    fn state(&self) -> tree::State {
-        tree::State::new(WheelState::default())
+        tree::Tag::stateless()
     }
 
     fn children(&self) -> Vec<Tree> {
@@ -130,80 +94,20 @@ impl Widget<Message, Theme, Renderer> for WheelScale<'_> {
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        let state = tree.state.downcast_mut::<WheelState>();
         let child = &mut tree.children[0];
-        match event {
-            Event::Mouse(mouse::Event::WheelScrolled { delta: delta @ mouse::ScrollDelta::Lines { .. } }) => {
-                if !SMOOTH_WHEEL {
-                    let scaled = Event::Mouse(mouse::Event::WheelScrolled { delta: scaled_delta(*delta) });
-                    self.content.as_widget_mut().update(child, &scaled, layout, cursor, renderer, clipboard, shell, viewport);
-                    return;
-                }
-                if let mouse::ScrollDelta::Pixels { x, y } = scaled_delta(*delta) {
-                    state.pending = state.pending + Vector::new(x, y);
-                }
-                // Move in this very frame; the rest eases in on the frames that follow.
-                let first = state.pending * WHEEL_FIRST_STEP;
-                state.pending = state.pending - first;
-                state.last = Some(Instant::now());
-                self.content.as_widget_mut().update(child, &wheel_event(first), layout, cursor, renderer, clipboard, shell, viewport);
-                shell.request_redraw();
-            }
-            Event::Window(window::Event::RedrawRequested(now)) if state.last.is_some() => {
-                self.content.as_widget_mut().update(child, event, layout, cursor, renderer, clipboard, shell, viewport);
-                let elapsed = now.saturating_duration_since(state.last.unwrap_or(*now)).as_secs_f32();
-                state.last = Some(*now);
-                let share = 1.0 - (-elapsed / WHEEL_EASE.as_secs_f32()).exp();
-                let step = if state.pending.x.abs() + state.pending.y.abs() < 0.5 { state.pending } else { state.pending * share };
-                state.pending = state.pending - step;
-                // The step goes through its own shell, so the redraw event is not
-                // marked captured for the widgets after this one.
-                let mut messages = Vec::new();
-                let mut inner = Shell::new(&mut messages);
-                self.content.as_widget_mut().update(child, &wheel_event(step), layout, cursor, renderer, clipboard, &mut inner, viewport);
-                let (redraw, layout_invalid, widgets_invalid) =
-                    (inner.redraw_request(), inner.is_layout_invalid(), inner.are_widgets_invalid());
-                for message in messages {
-                    shell.publish(message);
-                }
-                shell.request_redraw_at(redraw);
-                if layout_invalid {
-                    shell.invalidate_layout();
-                }
-                if widgets_invalid {
-                    shell.invalidate_widgets();
-                }
-                if state.pending == Vector::ZERO {
-                    state.last = None;
-                } else {
-                    shell.request_redraw_at(window::RedrawRequest::At(*now + WHEEL_FRAME));
-                }
-            }
-            _ => self.content.as_widget_mut().update(child, event, layout, cursor, renderer, clipboard, shell, viewport),
+        if let Event::Mouse(mouse::Event::WheelScrolled { delta: delta @ mouse::ScrollDelta::Lines { .. } }) = event {
+            let scaled = Event::Mouse(mouse::Event::WheelScrolled { delta: scaled_delta(*delta) });
+            self.content.as_widget_mut().update(child, &scaled, layout, cursor, renderer, clipboard, shell, viewport);
+            return;
         }
+        self.content.as_widget_mut().update(child, event, layout, cursor, renderer, clipboard, shell, viewport);
     }
 
-    fn mouse_interaction(
-        &self,
-        tree: &Tree,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-        renderer: &Renderer,
-    ) -> mouse::Interaction {
+    fn mouse_interaction(&self, tree: &Tree, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle, renderer: &Renderer) -> mouse::Interaction {
         self.content.as_widget().mouse_interaction(&tree.children[0], layout, cursor, viewport, renderer)
     }
 
-    fn draw(
-        &self,
-        tree: &Tree,
-        renderer: &mut Renderer,
-        theme: &Theme,
-        style: &renderer::Style,
-        layout: Layout<'_>,
-        cursor: mouse::Cursor,
-        viewport: &Rectangle,
-    ) {
+    fn draw(&self, tree: &Tree, renderer: &mut Renderer, theme: &Theme, style: &renderer::Style, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle) {
         self.content.as_widget().draw(&tree.children[0], renderer, theme, style, layout, cursor, viewport);
     }
 
@@ -219,12 +123,11 @@ impl Widget<Message, Theme, Renderer> for WheelScale<'_> {
     }
 }
 
-/// Pixels one wheel notch scrolls: Chromium's 100/3 px per line times the
-/// system's lines per notch (3 by default, so 100 px), which is what users of
-/// the Electron original are used to.
+/// Design units one wheel notch scrolls: WPF's 16 per line times the system's
+/// lines per notch (3 by default: 48).
 pub fn wheel_notch_px() -> f32 {
     static PX: OnceLock<f32> = OnceLock::new();
-    *PX.get_or_init(|| 100.0 / 3.0 * wheel_lines())
+    *PX.get_or_init(|| 16.0 * wheel_lines())
 }
 
 #[cfg(windows)]
@@ -237,7 +140,6 @@ fn wheel_lines() -> f32 {
     let mut lines: u32 = 3;
     // SAFETY: the call writes one u32 into `lines`.
     let ok = unsafe { SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, (&raw mut lines).cast(), 0) };
-    // u32::MAX means "one page per notch"; treat it like the default.
     if ok != 0 && (1..=100).contains(&lines) { lines as f32 } else { 3.0 }
 }
 
@@ -246,91 +148,241 @@ fn wheel_lines() -> f32 {
     3.0
 }
 
-/// A colour from a hue in 0..1 (avatar backgrounds without a picture).
-pub fn hue_color(hue: f32, saturation: f32, value: f32) -> Color {
-    let h = (hue.fract() * 6.0).max(0.0);
-    let i = h.floor() as i32;
-    let f = h - i as f32;
-    let (p, q, t) = (value * (1.0 - saturation), value * (1.0 - saturation * f), value * (1.0 - saturation * (1.0 - f)));
-    let (r, g, b) = match i % 6 {
-        0 => (value, t, p),
-        1 => (q, value, p),
-        2 => (p, value, t),
-        3 => (p, q, value),
-        4 => (t, p, value),
-        _ => (value, p, q),
-    };
-    Color::from_rgb(r, g, b)
+// ------------------------------------------------------------------ canvas
+
+/// The utilisation ring: a 3-unit stroke with the purple gradient, masked
+/// counter-clockwise from 12 o'clock so the coloured part is `value`%.
+pub struct Ring {
+    pub value: f32,
 }
 
-/// A circle with initials and an optional presence dot.
-pub fn avatar<'a>(name: &str, hue: f32, diameter: f32, online: Option<bool>, p: Palette) -> Element<'a, Message> {
-    let circle = container(text(crate::model::initials(name)).size(diameter * 0.38).font(font::SEMIBOLD).color(Color::WHITE))
-        .width(Length::Fixed(diameter))
-        .height(Length::Fixed(diameter))
-        .center(Length::Fixed(diameter))
-        .style(theme::card(hue_color(hue, 0.45, 0.72), diameter / 2.0, None));
-    match online {
-        None => circle.into(),
-        Some(online) => {
-            let ring = diameter * 0.32;
-            let dot = container(
-                container("")
-                    .width(Length::Fixed(ring * 0.66))
-                    .height(Length::Fixed(ring * 0.66))
-                    .style(theme::card(if online { p.positive } else { p.text_faint }, ring, None)),
-            )
-            .center(Length::Fixed(ring))
-            .style(theme::card(p.list, ring, None));
-            stack![circle, pin(dot).x(diameter - ring * 0.85).y(diameter - ring * 0.85)]
-                .width(Length::Fixed(diameter))
-                .height(Length::Fixed(diameter))
-                .into()
+impl canvas::Program<Message> for Ring {
+    type State = ();
+
+    fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let center = Point::new(bounds.width / 2.0, bounds.height / 2.0);
+        let radius = bounds.width.min(bounds.height) / 2.0 - 1.5;
+        let circle = Path::circle(center, radius);
+        let gradient = canvas::gradient::Linear::new(Point::new(center.x, bounds.height), Point::new(center.x, 0.0))
+            .add_stop(0.38, theme::hex(0xFA0FDD))
+            .add_stop(1.0, theme::hex(0x8438FF));
+        frame.stroke(&circle, Stroke::default().with_width(3.0).with_color(theme::hex(0xFA0FDD)));
+        frame.stroke(&circle, Stroke { style: canvas::Style::Gradient(gradient.into()), width: 3.0, ..Stroke::default() });
+        let masked = (100.0 - self.value.clamp(0.0, 100.0)) / 100.0;
+        if masked > 0.0 {
+            let top = -std::f32::consts::FRAC_PI_2;
+            let arc = Path::new(|b| {
+                b.arc(Arc {
+                    center,
+                    radius,
+                    start_angle: Radians(top - masked * std::f32::consts::TAU),
+                    end_angle: Radians(top),
+                })
+            });
+            frame.stroke(&arc, Stroke::default().with_width(3.5).with_color(c::RING_MASK));
         }
+        vec![frame.into_geometry()]
     }
 }
 
-/// A pill with a count.
-pub fn badge<'a>(count: u32, p: Palette) -> Element<'a, Message> {
-    let label = if count > 99 { "99+".to_owned() } else { count.to_string() };
-    container(text(label).size(font::SECTION).font(font::SEMIBOLD).color(p.on_accent))
-        .padding([2, 7])
-        .style(theme::card(p.accent, radius::PILL, None))
-        .into()
+pub fn ring<'a>(value: f32, size: f32) -> Element<'a, Message> {
+    canvas::Canvas::new(Ring { value }).width(Length::Fixed(size)).height(Length::Fixed(size)).into()
 }
 
-/// A square button with one icon and a hover fill.
-pub fn icon_button<'a>(icon: Icon, message: Message, p: Palette) -> Element<'a, Message> {
-    button(container(icon.view(size::ICON, p.text_muted)).center(Length::Fixed(size::ICON_BUTTON)))
-        .padding(0)
-        .width(Length::Fixed(size::ICON_BUTTON))
-        .height(Length::Fixed(size::ICON_BUTTON))
-        .style(theme::row_button(p, false, radius::MD))
-        .on_press(message)
-        .into()
+/// The advanced view's history chart: 256x144, 5 columns, up to three lines.
+pub struct Chart {
+    pub lines: Vec<(Color, Vec<f64>, f64)>,
 }
 
-/// A 1 px line in the border colour.
-pub fn hairline<'a>(p: Palette) -> Element<'a, Message> {
-    rule::horizontal(1).style(move |_| rule::Style {
-        color: p.border,
-        radius: 0.0.into(),
-        fill_mode: rule::FillMode::Full,
-        snap: true,
-    })
+impl canvas::Program<Message> for Chart {
+    type State = ();
+
+    fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        frame.fill_rectangle(Point::ORIGIN, bounds.size(), c::CHART_BG);
+        let plot = Rectangle::new(Point::new(8.0, 8.0), Size::new(bounds.width - 16.0, bounds.height - 16.0));
+        let border = Stroke::default().with_width(1.0).with_color(c::TRACK);
+        frame.stroke(&Path::rectangle(plot.position(), plot.size()), border);
+        for i in 1..5 {
+            let x = plot.x + plot.width * i as f32 / 5.0;
+            frame.stroke(&Path::line(Point::new(x, plot.y), Point::new(x, plot.y + plot.height)), border);
+        }
+        for (color, samples, range) in &self.lines {
+            if samples.len() < 2 {
+                continue;
+            }
+            let step = plot.width / 30.0;
+            let path = Path::new(|b| {
+                for (i, value) in samples.iter().enumerate() {
+                    let y = plot.y + plot.height - (*value / range).clamp(0.0, 1.0) as f32 * plot.height;
+                    let point = Point::new(plot.x + step * i as f32, y);
+                    if i == 0 { b.move_to(point) } else { b.line_to(point) }
+                }
+            });
+            frame.stroke(&path, Stroke::default().with_width(2.0).with_color(*color));
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+pub fn chart<'a>(lines: Vec<(Color, Vec<f64>, f64)>) -> Element<'a, Message> {
+    canvas::Canvas::new(Chart { lines }).width(Length::Fixed(256.0)).height(Length::Fixed(144.0)).into()
+}
+
+/// The AUTO/MAX switch: a 70.5 x 32 pill (blue at AUTO, teal at MAX) and a
+/// round thumb with a snowflake.
+pub struct FanSwitch {
+    pub max: bool,
+    pub enabled: bool,
+}
+
+impl canvas::Program<Message> for FanSwitch {
+    type State = ();
+
+    fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let alpha = if self.enabled { 1.0 } else { 0.5 };
+        let pill_h = 32.0;
+        let top = (bounds.height - pill_h) / 2.0;
+        let track = if self.max { c::TEAL } else { c::BLUE };
+        let pill = Path::rounded_rectangle(Point::new(0.0, top), Size::new(bounds.width, pill_h), (pill_h / 2.0).into());
+        frame.fill(&pill, Color { a: alpha, ..track });
+        let cx = if self.max { bounds.width - 15.3 } else { 15.3 };
+        let cy = bounds.height / 2.0;
+        frame.fill(&Path::circle(Point::new(cx, cy + 1.5), 12.5), Color::from_rgba(0.0, 0.0, 0.0, 0.18 * alpha));
+        frame.fill(&Path::circle(Point::new(cx, cy), 11.5), Color { a: alpha, ..c::TEXT });
+        let flake = Color { a: alpha, ..theme::hex(0x5495E3) };
+        let arm = 6.5;
+        for i in 0..3 {
+            let a = i as f32 * std::f32::consts::PI / 3.0;
+            let (s, co) = a.sin_cos();
+            frame.stroke(
+                &Path::line(Point::new(cx - co * arm, cy - s * arm), Point::new(cx + co * arm, cy + s * arm)),
+                Stroke::default().with_width(1.4).with_color(flake),
+            );
+        }
+        vec![frame.into_geometry()]
+    }
+}
+
+pub fn fan_switch<'a>(max: bool, enabled: bool) -> Element<'a, Message> {
+    canvas::Canvas::new(FanSwitch { max, enabled }).width(Length::Fixed(70.5)).height(Length::Fixed(35.5)).into()
+}
+
+/// The original's pill toggle (Auto Switch to Eco Mode): 39 x 19, blue when on.
+pub struct Pill {
+    pub on: bool,
+}
+
+impl canvas::Program<Message> for Pill {
+    type State = ();
+
+    fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let track = Path::rounded_rectangle(Point::new(0.5, 0.5), Size::new(38.0, 18.0), 9.0.into());
+        if self.on {
+            frame.fill(&track, c::BLUE);
+            frame.stroke(&track, Stroke::default().with_width(1.0).with_color(c::BLUE));
+        } else {
+            frame.stroke(&track, Stroke::default().with_width(1.0).with_color(c::WHITE));
+        }
+        let cx = if self.on { 39.0 - 3.0 - 6.0 } else { 3.0 + 6.0 };
+        frame.fill(&Path::circle(Point::new(cx, 9.5), 5.5), c::WHITE);
+        vec![frame.into_geometry()]
+    }
+}
+
+pub fn pill<'a>(on: bool) -> Element<'a, Message> {
+    canvas::Canvas::new(Pill { on }).width(Length::Fixed(39.0)).height(Length::Fixed(19.0)).into()
+}
+
+/// The F/C switch in the System Vitals header: 32 x 13 track, white 16 thumb.
+pub struct UnitSwitch {
+    pub celsius: bool,
+}
+
+impl canvas::Program<Message> for UnitSwitch {
+    type State = ();
+
+    fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let cy = bounds.height / 2.0;
+        frame.fill(&Path::rounded_rectangle(Point::new(0.0, cy - 6.5), Size::new(32.0, 13.0), 4.0.into()), c::BASE);
+        let cx = if self.celsius { 32.0 - 8.0 } else { 8.0 };
+        frame.fill(&Path::circle(Point::new(cx, cy), 8.0), c::WHITE);
+        frame.stroke(&Path::circle(Point::new(cx, cy), 8.0), Stroke::default().with_width(0.5).with_color(Color::BLACK));
+        vec![frame.into_geometry()]
+    }
+}
+
+pub fn unit_switch<'a>(celsius: bool) -> Element<'a, Message> {
+    canvas::Canvas::new(UnitSwitch { celsius }).width(Length::Fixed(32.0)).height(Length::Fixed(20.0)).into()
+}
+
+/// The advanced view's expander triangle: points down when open, up when closed.
+pub struct Triangle {
+    pub open: bool,
+}
+
+impl canvas::Program<Message> for Triangle {
+    type State = ();
+
+    fn draw(&self, _state: &(), renderer: &Renderer, _theme: &Theme, bounds: Rectangle, _cursor: mouse::Cursor) -> Vec<Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let (w, h) = (bounds.width, bounds.height);
+        let path = if self.open {
+            Path::new(|b| {
+                b.move_to(Point::new(1.0, h * 0.28));
+                b.line_to(Point::new(w - 1.0, h * 0.28));
+                b.line_to(Point::new(w / 2.0, h * 0.78));
+                b.close();
+            })
+        } else {
+            Path::new(|b| {
+                b.move_to(Point::new(1.0, h * 0.72));
+                b.line_to(Point::new(w - 1.0, h * 0.72));
+                b.line_to(Point::new(w / 2.0, h * 0.22));
+                b.close();
+            })
+        };
+        frame.fill(&path, c::TEXT);
+        vec![frame.into_geometry()]
+    }
+}
+
+pub fn triangle<'a>(open: bool) -> Element<'a, Message> {
+    canvas::Canvas::new(Triangle { open }).width(Length::Fixed(16.0)).height(Length::Fixed(16.0)).into()
+}
+
+/// A box with a `width`-unit gradient border (the original's selected card).
+pub fn gradient_border<'a>(inner: Element<'a, Message>, fill: Color, width: f32, w: f32, h: f32) -> Element<'a, Message> {
+    stack![
+        container(text(""))
+            .width(Length::Fixed(w))
+            .height(Length::Fixed(h))
+            .style(theme::gradient_fill(theme::omen_gradient(45.0))),
+        container(container(inner).width(Length::Fill).height(Length::Fill).style(theme::fill(fill)))
+            .padding(width)
+            .width(Length::Fixed(w))
+            .height(Length::Fixed(h)),
+    ]
     .into()
 }
 
-/// Cuts `text` to roughly fit `width` at `size` points, with an ellipsis.
-/// For exact ellipsis, measure with a custom widget (iced::advanced).
-pub fn ellipsize(text: &str, width: f32, size: f32) -> String {
-    let budget = (width / (size * 0.56)).floor().max(4.0) as usize;
-    if text.chars().count() <= budget {
-        return text.to_owned();
-    }
-    let cut: String = text.chars().take(budget.saturating_sub(1)).collect();
-    format!("{}…", cut.trim_end())
+/// A small label in the original's type (size, font, colour).
+pub fn label<'a>(content: impl Into<String>, size: f32, font: iced::Font, color: Color) -> iced::widget::Text<'a> {
+    text(content.into()).size(size).font(font).color(color)
 }
 
-/// Centre-aligned row spacing helper.
-pub const CENTER: Alignment = Alignment::Center;
+pub fn book<'a>(content: impl Into<String>, size: f32, color: Color) -> iced::widget::Text<'a> {
+    label(content, size, font::BOOK, color)
+}
+
+pub fn medium<'a>(content: impl Into<String>, size: f32, color: Color) -> iced::widget::Text<'a> {
+    label(content, size, font::MEDIUM, color)
+}
+
+pub fn bold<'a>(content: impl Into<String>, size: f32, color: Color) -> iced::widget::Text<'a> {
+    label(content, size, font::BOLD, color)
+}

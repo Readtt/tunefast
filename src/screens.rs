@@ -1,39 +1,48 @@
 //! Every screen the app can show. The ids are the contract with the
 //! fast-rebuild tooling: `--screen <id>` opens one, `--smoke` visits all of
-//! them, and `projects/<slug>/screens.md` names the same ids for the visual
-//! diff loop. Add a variant here for every core screen of the original app.
+//! them, and `projects/tunefast/screens.md` names the same ids.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
-    /// The main three-pane view with a conversation open.
-    Home,
-    /// The main view with nothing selected.
-    Empty,
-    /// Preferences.
-    Settings,
+    /// Performance modes, fan speed, auto switch to ECO, sensor readouts.
+    Performance,
+    /// System Vitals, basic view (tiles).
+    Vitals,
+    /// System Vitals, advanced view (per-core figures, chart).
+    VitalsAdvanced,
+    /// System Vitals, system information.
+    Sysinfo,
 }
 
 impl Screen {
-    pub const ALL: &'static [Screen] = &[Screen::Home, Screen::Empty, Screen::Settings];
+    pub const ALL: &'static [Screen] = &[Screen::Performance, Screen::Vitals, Screen::VitalsAdvanced, Screen::Sysinfo];
 
     pub fn id(self) -> &'static str {
         match self {
-            Screen::Home => "home",
-            Screen::Empty => "empty",
-            Screen::Settings => "settings",
+            Screen::Performance => "performance",
+            Screen::Vitals => "vitals",
+            Screen::VitalsAdvanced => "vitals-advanced",
+            Screen::Sysinfo => "sysinfo",
         }
     }
 
     pub fn title(self) -> &'static str {
         match self {
-            Screen::Home => "Conversation open",
-            Screen::Empty => "Nothing selected",
-            Screen::Settings => "Settings",
+            Screen::Performance => "Performance Control",
+            Screen::Vitals => "System Vitals",
+            Screen::VitalsAdvanced => "System Vitals, advanced view",
+            Screen::Sysinfo => "System information",
         }
     }
 
+    /// `-light` ids are the same screens in the light theme (snap.py passes --theme light).
     pub fn from_id(id: &str) -> Option<Screen> {
+        let id = id.strip_suffix("-light").unwrap_or(id);
         Screen::ALL.iter().copied().find(|screen| screen.id() == id)
+    }
+
+    pub fn is_vitals(self) -> bool {
+        matches!(self, Screen::Vitals | Screen::VitalsAdvanced | Screen::Sysinfo)
     }
 }
 
@@ -46,6 +55,7 @@ mod tests {
         for screen in Screen::ALL {
             assert_eq!(Screen::from_id(screen.id()), Some(*screen));
         }
+        assert_eq!(Screen::from_id("performance-light"), Some(Screen::Performance));
         let mut ids: Vec<_> = Screen::ALL.iter().map(|s| s.id()).collect();
         ids.sort_unstable();
         ids.dedup();

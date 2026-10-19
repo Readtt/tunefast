@@ -4,9 +4,13 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
-description = "Tunefast: a fast, native desktop app built with Rust and iced"
+description = "Tunefast: a fast, native control panel for an HP Victus 16 laptop's performance modes, fans and sensors"
 repository = "https://github.com/Readtt/tunefast"
 publish = false
+
+[workspace]
+members = ["core", "helper"]
+default-members = [".", "core", "helper"]
 
 [[bin]]
 name = "tunefast"
@@ -14,13 +18,12 @@ path = "src/main.rs"
 
 [features]
 default = []
-# The GPU renderer (wgpu). Off by default: on Windows the CPU renderer
-# (tiny-skia) idles at ~13 MB against ~148 MB for wgpu, with similar redraw
-# cost at desktop window sizes. Turn this on only for heavy animation, video
-# or large canvases, and benchmark both.
+# The GPU renderer (wgpu). Off by default: the CPU renderer (tiny-skia) keeps
+# a GPU driver out of the process (~13 MB idle against ~148 MB for wgpu).
 gpu = ["iced/wgpu"]
 
 [dependencies]
+tunefast-core = { path = "core" }
 anyhow = "1"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
@@ -28,20 +31,50 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4.5", features = ["derive"] }
 # The UI, drawn on the CPU with tiny-skia: no GPU driver in the process.
-# `tokio` runs Task futures on tokio so reqwest and websockets work.
-iced = { version = "0.14", default-features = false, features = ["tiny-skia", "crisp", "web-colors", "tokio", "svg", "image", "markdown", "advanced", "advanced-shaping", "x11", "wayland", "linux-theme-detection"] }
+# Offscreen rendering for --screenshot and --smoke (same version iced uses).
+iced_runtime = "0.14"
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "crisp", "web-colors", "tokio", "svg", "image", "canvas", "advanced", "advanced-shaping", "x11", "wayland"] }
 tokio = { version = "1", features = ["time", "sync", "rt-multi-thread", "macros"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "http2"] }
 # PNG writing for --screenshot.
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(windows)'.dependencies]
+wmi = { version = "0.18", default-features = false }
+nvml-wrapper = "0.11"
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+windows = { version = "0.62", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_Display",
+    "Win32_Devices_Properties",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Storage_FileSystem",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Performance",
+    "Win32_System_Pipes",
+    "Win32_System_Power",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [target.'cfg(windows)'.build-dependencies]
 # Embeds assets/icon.ico as the executable's icon in Explorer and the taskbar.
 winresource = "0.1"
 
 [profile.release]
-lto = "thin"
-codegen-units = 1
+# ITERATION SETTINGS (restore lto = "thin", codegen-units = 1 before benchmarking and release)
+lto = false
+codegen-units = 16
 strip = true
 panic = "abort"
 
