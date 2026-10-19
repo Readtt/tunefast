@@ -10,7 +10,7 @@ pub fn store() -> Store {
     let clocks = vec![2817.0, 2746.0, 3034.0, 2931.0, 2620.0, 2443.0, 2535.0, 2295.0, 1451.0, 1502.0, 1622.0, 1396.0, 1455.0, 1502.0, 1531.0, 1609.0];
     let utils = vec![52.0, 11.1, 6.5, 53.4, 44.5, 6.5, 46.7, 21.1, 36.9, 11.3, 8.3, 51.7, 60.5, 29.4, 21.0, 13.5];
     Store {
-        device: "VICTUS Laptop".to_owned(),
+        device: "GAMING Laptop".to_owned(),
         controls: Controls { mode: Mode::Default, max_fan: false, auto_eco: false, auto_eco_active: false, helper: HelperState::Ready },
         vitals: Vitals {
             cpu_temp: Some(62.0),

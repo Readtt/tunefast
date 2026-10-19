@@ -6,8 +6,24 @@
 
 use crate::model::{Advanced, Vitals};
 
+/// The page on screen, so the sensor thread reads only what it shows (the
+/// original's pages each start their own monitors): 0 Performance Control,
+/// 1 System Vitals basic, 2 advanced, 3 system information.
+pub static PAGE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn show_page(screen: crate::screens::Screen) {
+    use crate::screens::Screen;
+    let page = match screen {
+        Screen::Performance => 0,
+        Screen::Vitals => 1,
+        Screen::VitalsAdvanced => 2,
+        Screen::Sysinfo => 3,
+    };
+    PAGE.store(page, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// One sample for the screens.
-#[derive(Clone, Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
 pub struct Reading {
     pub vitals: Vitals,
     pub advanced: Advanced,

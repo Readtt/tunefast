@@ -18,7 +18,7 @@ use windows::core::{HSTRING, PCWSTR};
 use wmi::WMIConnection;
 
 use super::Reading;
-use crate::model::{Advanced, Drive, Gpu, GpuDetail, MemoryModule, Process, SysInfo, Vitals, push_history};
+use crate::model::{Advanced, Drive, Gpu, GpuDetail, MemoryModule, Process, SysInfo, push_history};
 
 // ------------------------------------------------------------ helper client
 
@@ -142,65 +142,80 @@ pub fn sensor_thread(tx: tokio::sync::mpsc::Sender<Reading>) {
     let mut advanced = Advanced::default();
     advanced.cpu.name = clean_cpu_name(&processor_name());
     let mut tick: u64 = 0;
+    let mut last = Reading::default();
     loop {
         let started = Instant::now();
         if tx.is_closed() {
             return;
         }
-        let c = cpu.sample();
-        let temp = cpu_temperature(thermal.as_ref()).map(|t| smoother.push(t));
-        let g = gpu.sample();
-        let (up, down) = net.sample();
-        let (used, total, load) = memory();
-        // The original refreshes the process list every 2.5 s and storage less often.
-        let top = if tick < 2 || tick % 3 == 0 { Some(processes.sample(&gpu_by_process())) } else { None };
-        let fans = fan_speeds();
-
-        let average_clock = if c.clocks.is_empty() { 0.0 } else { c.clocks.iter().sum::<f64>() / c.clocks.len() as f64 };
-        let a = &mut advanced;
-        a.cpu.clocks_mhz = c.clocks.clone();
-        a.cpu.package_temp = temp;
-        a.cpu.package_util = c.total;
-        a.cpu.utils = c.utils.clone();
-        push_history(&mut a.cpu.clock_history, average_clock);
-        push_history(&mut a.cpu.temp_history, temp.unwrap_or(0.0));
-        push_history(&mut a.cpu.util_history, c.total);
-        a.gpu = GpuDetail {
-            clock_history: std::mem::take(&mut a.gpu.clock_history),
-            temp_history: std::mem::take(&mut a.gpu.temp_history),
-            util_history: std::mem::take(&mut a.gpu.util_history),
-            ..g.detail.clone()
-        };
-        push_history(&mut a.gpu.clock_history, g.detail.core_clock_mhz);
-        push_history(&mut a.gpu.temp_history, g.detail.temp.unwrap_or(0.0));
-        push_history(&mut a.gpu.util_history, g.detail.util_core);
-        a.ram.used_gb = used;
-        a.ram.total_gb = total;
-        push_history(&mut a.ram.util_history, if total > 0.0 { used / total * 100.0 } else { 0.0 });
-        a.network.upload_mbps = up;
-        a.network.download_mbps = down;
-        push_history(&mut a.network.upload_history, up);
-        push_history(&mut a.network.download_history, down);
-
-        let reading = Reading {
-            vitals: Vitals {
-                cpu_temp: temp,
-                gpu_temp: g.detail.temp,
-                cpu_util: Some(c.total),
-                gpu_util: (!g.detail.inactive && !g.detail.absent).then_some(g.detail.util_core),
-                gpu_inactive: g.detail.inactive,
-                ram_used_gb: used,
-                ram_total_gb: total,
-                ram_load: Some(load),
-                drives: fixed_drives(),
-                upload_mbps: up,
-                download_mbps: down,
-                processes: top.unwrap_or_else(|| processes.last.clone()),
-                fans_rpm: fans,
-            },
-            advanced: advanced.clone(),
-            on_ac: on_ac(),
-        };
+        // 0 Performance Control, 1 basic, 2 advanced, 3 system information.
+        let page = super::PAGE.load(std::sync::atomic::Ordering::Relaxed);
+        let mut reading = Reading { on_ac: on_ac(), ..last.clone() };
+        if page != 3 {
+            let c = cpu.sample(page == 2);
+            let temp = cpu_temperature(thermal.as_ref()).map(|t| smoother.push(t));
+            let g = gpu.sample(page == 2);
+            let v = &mut reading.vitals;
+            v.cpu_temp = temp;
+            v.cpu_util = Some(c.total);
+            v.gpu_temp = g.detail.temp;
+            v.gpu_util = (!g.detail.inactive && !g.detail.absent).then_some(g.detail.util_core);
+            v.gpu_inactive = g.detail.inactive;
+            if page == 0 {
+                v.fans_rpm = fan_speeds();
+            }
+            if page == 1 || page == 2 {
+                let (used, total, load) = memory();
+                let (up, down) = net.sample();
+                v.ram_used_gb = used;
+                v.ram_total_gb = total;
+                v.ram_load = Some(load);
+                v.upload_mbps = up;
+                v.download_mbps = down;
+            }
+            if page == 1 {
+                // The original refreshes the process list every 2.5 s and storage less often.
+                if tick < 2 || tick % 3 == 0 {
+                    v.processes = processes.sample(&gpu_by_process());
+                    v.drives = fixed_drives();
+                }
+            }
+            if page == 2 {
+                let average_clock = if c.clocks.is_empty() { 0.0 } else { c.clocks.iter().sum::<f64>() / c.clocks.len() as f64 };
+                let a = &mut advanced;
+                a.cpu.clocks_mhz = c.clocks.clone();
+                a.cpu.package_temp = temp;
+                a.cpu.package_util = c.total;
+                a.cpu.utils = c.utils.clone();
+                push_history(&mut a.cpu.clock_history, average_clock);
+                push_history(&mut a.cpu.temp_history, temp.unwrap_or(0.0));
+                push_history(&mut a.cpu.util_history, c.total);
+                a.gpu = GpuDetail {
+                    clock_history: std::mem::take(&mut a.gpu.clock_history),
+                    temp_history: std::mem::take(&mut a.gpu.temp_history),
+                    util_history: std::mem::take(&mut a.gpu.util_history),
+                    ..g.detail.clone()
+                };
+                push_history(&mut a.gpu.clock_history, g.detail.core_clock_mhz);
+                push_history(&mut a.gpu.temp_history, g.detail.temp.unwrap_or(0.0));
+                push_history(&mut a.gpu.util_history, g.detail.util_core);
+                let v = &reading.vitals;
+                a.ram.used_gb = v.ram_used_gb;
+                a.ram.total_gb = v.ram_total_gb;
+                push_history(&mut a.ram.util_history, if v.ram_total_gb > 0.0 { v.ram_used_gb / v.ram_total_gb * 100.0 } else { 0.0 });
+                a.network.upload_mbps = v.upload_mbps;
+                a.network.download_mbps = v.download_mbps;
+                push_history(&mut a.network.upload_history, v.upload_mbps);
+                push_history(&mut a.network.download_history, v.download_mbps);
+                reading.advanced = advanced.clone();
+            }
+        }
+        if tick > 0 && reading == last {
+            tick += 1;
+            std::thread::sleep(Duration::from_millis(1000).saturating_sub(started.elapsed()));
+            continue;
+        }
+        last = reading.clone();
         if tx.blocking_send(reading).is_err() {
             return;
         }
@@ -260,7 +275,8 @@ impl Pdh {
             if status != PDH_MORE_DATA || size == 0 {
                 return values;
             }
-            let mut buffer = vec![0u8; size as usize];
+            // u64 storage keeps the items 8-byte aligned (they hold pointers and doubles).
+            let mut buffer = vec![0u64; (size as usize).div_ceil(8)];
             let items = buffer.as_mut_ptr().cast::<PDH_FMT_COUNTERVALUE_ITEM_W>();
             if PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &mut size, &mut count, Some(items)) != 0 {
                 return values;
@@ -308,10 +324,14 @@ impl CpuSampler {
         }
     }
 
-    fn sample(&mut self) -> CpuSample {
+    fn sample(&mut self, per_core: bool) -> CpuSample {
         let mut sample = CpuSample { total: 0.0, utils: Vec::new(), clocks: Vec::new() };
         let Some(pdh) = &self.pdh else { return sample };
         if !pdh.collect() {
+            return sample;
+        }
+        if !per_core {
+            sample.total = pdh.single(3).unwrap_or(0.0).clamp(0.0, 100.0);
             return sample;
         }
         let utility = pdh.array(0);
@@ -370,16 +390,22 @@ struct GpuSample {
 struct GpuSampler {
     nvml: Option<nvml_wrapper::Nvml>,
     present: Option<bool>,
+    awake: Option<bool>,
+    checked: Option<Instant>,
 }
 
 impl GpuSampler {
     fn new() -> Self {
-        GpuSampler { nvml: None, present: None }
+        GpuSampler { nvml: None, present: None, awake: None, checked: None }
     }
 
-    fn sample(&mut self) -> GpuSample {
+    fn sample(&mut self, detailed: bool) -> GpuSample {
         let mut detail = GpuDetail::default();
-        let awake = nvidia_awake();
+        if self.checked.is_none_or(|at| at.elapsed() >= Duration::from_secs(5)) {
+            self.awake = nvidia_awake();
+            self.checked = Some(Instant::now());
+        }
+        let awake = self.awake;
         if self.present.is_none() {
             self.present = Some(awake.is_some());
         }
@@ -407,11 +433,15 @@ impl GpuSampler {
             return GpuSample { detail };
         };
         use nvml_wrapper::enum_wrappers::device::{Clock, PcieUtilCounter, TemperatureSensor};
-        detail.name = device.name().unwrap_or_default();
+        detail.name = self.cached_name();
         detail.temp = device.temperature(TemperatureSensor::Gpu).ok().map(f64::from);
         if let Ok(util) = device.utilization_rates() {
             detail.util_core = f64::from(util.gpu);
             detail.util_frame_buffer = f64::from(util.memory);
+        }
+        if !detailed {
+            detail.inactive = detail.util_core <= 0.0 && detail.temp.unwrap_or(0.0) <= 0.0;
+            return GpuSample { detail };
         }
         let encoder = device.encoder_utilization().map(|u| u.utilization).unwrap_or(0);
         let decoder = device.decoder_utilization().map(|u| u.utilization).unwrap_or(0);

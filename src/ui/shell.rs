@@ -115,7 +115,9 @@ fn tab<'a>(label: &'a str, width: f32, selected: bool, on_press: Message) -> Ele
 }
 
 fn titlebar(app: &App, p: Palette) -> Element<'_, Message> {
-    let mark = image(image::Handle::from_bytes(include_bytes!("../../assets/icon.png").as_slice()))
+    // One handle for the life of the app: a new handle per view would decode the PNG every frame.
+    static MARK: std::sync::OnceLock<image::Handle> = std::sync::OnceLock::new();
+    let mark = image(MARK.get_or_init(|| image::Handle::from_bytes(include_bytes!("../../assets/icon.png").as_slice())).clone())
         .width(Length::Fixed(22.0))
         .height(Length::Fixed(22.0));
     let caption = |glyph: Icon, message: Message, close: bool| {

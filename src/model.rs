@@ -16,7 +16,7 @@ pub enum HelperState {
     Unsupported,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Controls {
     pub mode: Mode,
@@ -33,7 +33,7 @@ impl Default for Controls {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Drive {
     pub name: String,
@@ -41,7 +41,7 @@ pub struct Drive {
     pub total_gb: f64,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Process {
     pub name: String,
@@ -53,7 +53,7 @@ pub struct Process {
 }
 
 /// The live numbers (System Vitals and the Performance Control readouts).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Vitals {
     pub cpu_temp: Option<f64>,
@@ -93,7 +93,7 @@ pub fn push_history(history: &mut History, value: f64) {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CpuDetail {
     pub name: String,
@@ -109,7 +109,7 @@ pub struct CpuDetail {
     pub util_history: History,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GpuDetail {
     /// No discrete GPU: the section is hidden.
@@ -131,7 +131,7 @@ pub struct GpuDetail {
     pub util_history: History,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RamDetail {
     pub used_gb: f64,
@@ -139,7 +139,7 @@ pub struct RamDetail {
     pub util_history: History,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct NetDetail {
     pub upload_mbps: f64,
@@ -149,7 +149,7 @@ pub struct NetDetail {
 }
 
 /// The advanced view: CPU, GPU, RAM and network sections.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Advanced {
     pub cpu: CpuDetail,
@@ -158,7 +158,7 @@ pub struct Advanced {
     pub network: NetDetail,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryModule {
     pub part: String,
@@ -167,7 +167,7 @@ pub struct MemoryModule {
     pub speed_mhz: u32,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Gpu {
     pub name: String,
@@ -176,7 +176,7 @@ pub struct Gpu {
 }
 
 /// System information (read once).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SysInfo {
     pub model: String,
@@ -194,7 +194,7 @@ pub struct SysInfo {
 }
 
 /// Everything a screen can show. `--fixtures <file>` loads one of these.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Store {
     /// The laptop's name in the menu (from its model string).

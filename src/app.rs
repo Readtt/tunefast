@@ -163,6 +163,7 @@ impl App {
         }
         let screen = args.screen.as_deref().and_then(Screen::from_id).or(last_screen).unwrap_or(Screen::Performance);
         let scale = theme::window_scale(points[0], points[1]);
+        crate::hw::show_page(screen);
         let app = App {
             screen,
             vitals_screen: if screen.is_vitals() { screen } else { Screen::Vitals },
@@ -191,6 +192,7 @@ impl App {
         match message {
             Message::Navigate(screen) => {
                 self.screen = screen;
+                crate::hw::show_page(screen);
                 if screen.is_vitals() {
                     self.vitals_screen = screen;
                 }

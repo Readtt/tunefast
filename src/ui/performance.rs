@@ -97,6 +97,10 @@ fn canvas(app: &App) -> Element<'_, Message> {
         .at(0.0, 519.0, container(title).center_x(Length::Fixed(CANVAS[0])))
         .at(0.0, 556.0, container(fan_row).center_x(Length::Fixed(CANVAS[0])))
         .at(0.0, 646.0, separator());
+    if !app.store.vitals.fans_rpm.is_empty() {
+        let speeds = app.store.vitals.fans_rpm.iter().map(|rpm| format!("{rpm} RPM")).collect::<Vec<_>>().join("   ");
+        board = board.at(0.0, 604.0, centred(t(format!("Fan speed   {speeds}"), 14.0, font::BOOK, c::GREY), CANVAS[0]));
+    }
     // Sensor readouts, centred, 76 apart.
     let v = &app.store.vitals;
     let fahrenheit = app.store.fahrenheit;
