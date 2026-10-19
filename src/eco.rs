@@ -74,8 +74,7 @@ mod platform {
         QueryDisplayConfig,
     };
     use windows::Win32::Graphics::Gdi::{
-        CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_SUCCESSFUL, DM_DISPLAYFREQUENCY,
-        ENUM_CURRENT_SETTINGS, ENUM_DISPLAY_SETTINGS_MODE, EnumDisplaySettingsW,
+        CDS_UPDATEREGISTRY, ChangeDisplaySettingsExW, DEVMODEW, DISP_CHANGE_SUCCESSFUL, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW,
     };
     use windows::core::PCWSTR;
 
@@ -133,26 +132,27 @@ mod platform {
         current_mode(&name).map(|mode| mode.dmDisplayFrequency)
     }
 
-    /// Switches the panel to `hz` at its current resolution, if it offers that rate.
+    /// Switches the panel to `hz` the way the original's DisplayRefreshRateHelper
+    /// does: the current mode with only the frequency changed,
+    /// CDS_UPDATEREGISTRY | CDS_RESET, and one Hz either side if the driver
+    /// calls the exact rate a bad mode.
     pub fn set_refresh_rate(hz: u32) -> bool {
+        use windows::Win32::Graphics::Gdi::{CDS_RESET, DISP_CHANGE_BADMODE};
         let Some(name) = internal_display() else { return false };
         let Some(current) = current_mode(&name) else { return false };
-        let offered = (0..).map_while(|i| {
-            let mut mode = DEVMODEW { dmSize: std::mem::size_of::<DEVMODEW>() as u16, ..Default::default() };
-            unsafe { EnumDisplaySettingsW(PCWSTR(name.as_ptr()), ENUM_DISPLAY_SETTINGS_MODE(i), &mut mode).as_bool().then_some(mode) }
-        });
-        let fits = offered.into_iter().any(|m| {
-            m.dmPelsWidth == current.dmPelsWidth && m.dmPelsHeight == current.dmPelsHeight && m.dmDisplayFrequency == hz
-        });
-        if !fits {
-            return false;
+        for rate in [hz, hz + 1, hz.saturating_sub(1)] {
+            let mut mode = current;
+            mode.dmDisplayFrequency = rate;
+            let result = unsafe { ChangeDisplaySettingsExW(PCWSTR(name.as_ptr()), Some(&mode), None, CDS_UPDATEREGISTRY | CDS_RESET, None) };
+            if result == DISP_CHANGE_SUCCESSFUL {
+                return true;
+            }
+            if result != DISP_CHANGE_BADMODE {
+                log::warn!("refresh rate {rate} Hz refused: {result:?}");
+                return false;
+            }
         }
-        let mut mode = current;
-        mode.dmDisplayFrequency = hz;
-        mode.dmFields = DM_DISPLAYFREQUENCY;
-        unsafe {
-            ChangeDisplaySettingsExW(PCWSTR(name.as_ptr()), Some(&mode), None, CDS_UPDATEREGISTRY, None) == DISP_CHANGE_SUCCESSFUL
-        }
+        false
     }
 
     // ------------------------------------------------------- NVIDIA (NVAPI DRS)
@@ -275,6 +275,33 @@ mod tests {
     fn internal_panel_refresh_rate_is_readable() {
         let hz = platform::refresh_rate().expect("an internal panel");
         assert!(hz >= 60, "{hz} Hz");
+    }
+
+    /// The whole ECO path as the app runs it: enter (60 Hz on the panel, the
+    /// 60 fps cap), then leave; both must be exactly as found afterwards. The
+    /// found state is put back before anything is asserted.
+    #[test]
+    #[ignore = "switches the laptop panel to 60 Hz and sets the NVIDIA cap, then restores both; run by hand"]
+    fn eco_enter_and_leave_restore_the_found_state() {
+        let (hz, cap) = (platform::refresh_rate().expect("an internal panel"), platform::frame_cap().expect("an NVIDIA driver"));
+        println!("found: {hz} Hz, cap {cap:?}");
+        let saved = super::enter(None);
+        let in_eco = (platform::refresh_rate(), platform::frame_cap());
+        println!("in ECO: {:?} Hz, cap {:?}; saved {saved:?}", in_eco.0, in_eco.1);
+        let left = super::leave(&saved);
+        // Belt and braces: whatever happened, put the found state back.
+        if platform::refresh_rate() != Some(hz) {
+            platform::set_refresh_rate(hz);
+        }
+        if platform::frame_cap() != Some(cap) {
+            platform::set_frame_cap(cap);
+        }
+        let after = (platform::refresh_rate(), platform::frame_cap());
+        println!("after: {:?} Hz, cap {:?}", after.0, after.1);
+        assert_eq!(after, (Some(hz), Some(cap)), "found state restored");
+        assert_eq!(left, None, "leave() put everything back by itself");
+        assert_eq!(in_eco.0, Some(tunefast_core::eco::ECO_REFRESH_HZ), "ECO runs the panel at 60 Hz");
+        assert_eq!(in_eco.1, Some(Some(tunefast_core::eco::eco_frame_cap(cap.unwrap_or(0)))), "ECO caps NVIDIA frames");
     }
 
     /// Changes the NVIDIA global "Max Frame Rate" to 60 and puts back exactly
