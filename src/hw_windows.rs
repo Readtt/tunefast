@@ -138,6 +138,7 @@ pub fn sensor_thread(tx: tokio::sync::mpsc::Sender<Reading>) {
     let mut net = NetSampler::new();
     let mut processes = ProcessSampler::new();
     let mut smoother = TemperatureSmoother::default();
+    let thermal = Pdh::new(&[r"\Thermal Zone Information(*)\High Precision Temperature"]);
     let mut advanced = Advanced::default();
     advanced.cpu.name = clean_cpu_name(&processor_name());
     let mut tick: u64 = 0;
@@ -147,12 +148,12 @@ pub fn sensor_thread(tx: tokio::sync::mpsc::Sender<Reading>) {
             return;
         }
         let c = cpu.sample();
-        let temp = cpu_temperature().map(|t| smoother.push(t));
+        let temp = cpu_temperature(thermal.as_ref()).map(|t| smoother.push(t));
         let g = gpu.sample();
         let (up, down) = net.sample();
         let (used, total, load) = memory();
         // The original refreshes the process list every 2.5 s and storage less often.
-        let top = if tick % 3 == 0 { Some(processes.sample(&gpu_by_process())) } else { None };
+        let top = if tick < 2 || tick % 3 == 0 { Some(processes.sample(&gpu_by_process())) } else { None };
         let fans = fan_speeds();
 
         let average_clock = if c.clocks.is_empty() { 0.0 } else { c.clocks.iter().sum::<f64>() / c.clocks.len() as f64 };
@@ -343,19 +344,18 @@ fn clean_cpu_name(name: &str) -> String {
     name.replace("(R)", "").replace("(TM)", "").split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// CPU temperature from the ACPI thermal zone (firmware-reported; no driver).
-/// `MSAcpi_ThermalZoneTemperature` reports tenths of a kelvin.
-fn cpu_temperature() -> Option<f64> {
-    #[derive(serde::Deserialize)]
-    #[serde(rename = "MSAcpi_ThermalZoneTemperature")]
-    struct Zone {
-        #[serde(rename = "CurrentTemperature")]
-        current_temperature: u32,
+/// CPU temperature from the firmware's ACPI thermal zone, through the
+/// "Thermal Zone Information" counters (readable without admin rights; the
+/// MSAcpi WMI class is not). Tenths of a kelvin; the hottest zone. The
+/// original reads the package sensor through its kernel driver, which can be
+/// a few degrees lower.
+fn cpu_temperature(pdh: Option<&Pdh>) -> Option<f64> {
+    let pdh = pdh?;
+    if !pdh.collect() {
+        return None;
     }
-    let wmi = WMIConnection::with_namespace_path("ROOT\\WMI").ok()?;
-    let zones: Vec<Zone> = wmi.raw_query("SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature").ok()?;
-    let max = zones.iter().map(|z| z.current_temperature).max()?;
-    (max > 0).then(|| f64::from(max) / 10.0 - 273.15)
+    let hottest = pdh.array(0).into_values().fold(f64::NAN, f64::max);
+    (hottest.is_finite() && hottest > 0.0).then(|| hottest / 10.0 - 273.15)
 }
 
 // ------------------------------------------------------------------- GPU
@@ -714,33 +714,36 @@ fn video_controllers() -> Vec<Gpu> {
 }
 
 fn memory_modules() -> Vec<MemoryModule> {
-    #[derive(serde::Deserialize)]
-    #[serde(rename = "Win32_PhysicalMemory")]
-    struct Module {
-        #[serde(rename = "PartNumber")]
-        part_number: Option<String>,
-        #[serde(rename = "Capacity")]
-        capacity: Option<String>,
-        #[serde(rename = "Speed")]
-        speed: Option<u32>,
-        #[serde(rename = "SMBIOSMemoryType")]
-        smbios_memory_type: Option<u32>,
-    }
     let Ok(wmi) = WMIConnection::new() else {
         return Vec::new();
     };
-    let items: Vec<Module> = wmi.query().unwrap_or_default();
-    items
-        .into_iter()
-        .map(|m| MemoryModule {
-            part: m.part_number.unwrap_or_default().trim().to_owned(),
-            capacity_gb: m.capacity.and_then(|c| c.parse::<u64>().ok()).map(|b| (b / 1_073_741_824) as u32).unwrap_or(0),
-            kind: match m.smbios_memory_type {
-                Some(34) => "DDR5".to_owned(),
-                Some(26) => "DDR4".to_owned(),
+    let rows: Vec<HashMap<String, wmi::Variant>> =
+        wmi.raw_query("SELECT PartNumber, Capacity, Speed, SMBIOSMemoryType FROM Win32_PhysicalMemory").unwrap_or_default();
+    let number = |value: Option<&wmi::Variant>| -> u64 {
+        match value {
+            Some(wmi::Variant::String(text)) => text.trim().parse().unwrap_or(0),
+            Some(wmi::Variant::UI8(n)) => *n,
+            Some(wmi::Variant::UI4(n)) => u64::from(*n),
+            Some(wmi::Variant::UI2(n)) => u64::from(*n),
+            Some(wmi::Variant::I8(n)) => (*n).max(0) as u64,
+            Some(wmi::Variant::I4(n)) => (*n).max(0) as u64,
+            _ => 0,
+        }
+    };
+    rows.iter()
+        .map(|row| MemoryModule {
+            part: match row.get("PartNumber") {
+                Some(wmi::Variant::String(part)) => part.trim().to_owned(),
+                _ => String::new(),
+            },
+            capacity_gb: (number(row.get("Capacity")) / 1_073_741_824) as u32,
+            kind: match number(row.get("SMBIOSMemoryType")) {
+                34 => "DDR5".to_owned(),
+                26 => "DDR4".to_owned(),
+                24 => "DDR3".to_owned(),
                 _ => "DDR".to_owned(),
             },
-            speed_mhz: m.speed.unwrap_or(0),
+            speed_mhz: number(row.get("Speed")) as u32,
         })
         .collect()
 }
@@ -756,7 +759,9 @@ fn audio_devices() -> Vec<String> {
         return Vec::new();
     };
     let items: Vec<Sound> = wmi.query().unwrap_or_default();
-    items.into_iter().filter_map(|s| s.name).collect()
+    // Some drivers' INF names carry an ANSI registered sign that WMI hands
+    // back as U+FFFD ("Intel\u{fffd} Smart Sound"); show the sign they meant.
+    items.into_iter().filter_map(|s| s.name).map(|name| name.replace('\u{fffd}', "\u{ae}")).collect()
 }
 
 

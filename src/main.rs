@@ -41,6 +41,18 @@ fn main() -> iced::Result {
         return Ok(());
     }
 
+    if args.print_reading {
+        // Two samples, so utilisation figures cover a full second.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        std::thread::spawn(move || hw::sensor_thread(tx));
+        let _ = rx.blocking_recv();
+        let reading = rx.blocking_recv();
+        let info = hw::read_system_info();
+        let json = serde_json::json!({ "reading": reading, "sysinfo": info });
+        println!("{}", serde_json::to_string_pretty(&json).unwrap_or_default());
+        return Ok(());
+    }
+
     // Screenshots and smoke runs draw offscreen: no window, no focus taken.
     if args.screenshot.is_some() || args.smoke {
         let points = args.size.unwrap_or(theme::size::DEFAULT_WINDOW);

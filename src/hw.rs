@@ -7,7 +7,7 @@
 use crate::model::{Advanced, Vitals};
 
 /// One sample for the screens.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Reading {
     pub vitals: Vitals,
     pub advanced: Advanced,

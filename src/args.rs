@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use clap::{Parser, ValueEnum};
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "tunefast", version, about = "A fast, native desktop app")]
+#[command(name = "tunefast", version, about = "Performance modes, fans and system vitals for an HP Victus 16 laptop, native and fast")]
 pub struct Args {
     /// Run with built-in sample data: no account, no network.
     #[arg(long)]
@@ -53,6 +53,11 @@ pub struct Args {
     /// Print the screen ids and exit.
     #[arg(long)]
     pub list_screens: bool,
+
+    /// Read the sensors and system information once (no window, nothing
+    /// changed), print them as JSON and exit.
+    #[arg(long)]
+    pub print_reading: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
