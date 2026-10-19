@@ -48,8 +48,10 @@ pub struct Process {
     pub cpu: u32,
     pub gpu: u32,
     pub ram_mb: u32,
-    /// The processes grouped under this name (STOP ends them all).
+    /// The processes grouped under this name (STOP ends them all) and each
+    /// one's executable, checked again before ending it.
     pub pids: Vec<u32>,
+    pub exes: Vec<String>,
 }
 
 /// The live numbers (System Vitals and the Performance Control readouts).

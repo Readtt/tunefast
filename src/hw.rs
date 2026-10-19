@@ -50,7 +50,7 @@ mod platform {
     }
     pub fn print_text(_text: &str) {}
     pub fn open_task_manager() {}
-    pub fn end_processes(_pids: &[u32]) {}
+    pub fn end_processes(_pids: &[u32], _exes: &[String]) {}
 }
 
 #[cfg(windows)]

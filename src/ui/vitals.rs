@@ -262,7 +262,7 @@ fn processes_tile(v: &Vitals) -> Element<'_, Message> {
             .at(240.0, top, cell(format!("{}%", process.cpu), 75.0))
             .at(315.0, top, cell(format!("{}%", process.gpu), 75.0))
             .at(390.0, top, cell(format!("{}MB", process.ram_mb), 80.0))
-            .at(508.0, top + 8.0, stop_button(process.pids.clone()));
+            .at(508.0, top + 8.0, stop_button(process.pids.clone(), process.exes.clone()));
     }
     let task_manager = mouse_area(t("Open Task Manager", 12.0, font::BOOK, c::HYPER_GREY))
         .on_press(Message::OpenTaskManager)
@@ -271,9 +271,11 @@ fn processes_tile(v: &Vitals) -> Element<'_, Message> {
 }
 
 /// The original's STOP button: a 24-unit #d8d8d8 square with a dark "no" sign.
-fn stop_button<'a>(pids: Vec<u32>) -> Element<'a, Message> {
-    crate::ui::widgets::press_row(
-        |hovered| crate::ui::widgets::stop_glyph(hovered),
-        Message::EndProcesses(pids),
-    )
+fn stop_button<'a>(pids: Vec<u32>, exes: Vec<String>) -> Element<'a, Message> {
+    // STOP ends programs, so it acts on release (a press can still be dragged off).
+    iced::widget::button(crate::ui::widgets::stop_glyph(false))
+        .padding(0)
+        .style(theme::bare)
+        .on_press(Message::EndProcesses(pids, exes))
+        .into()
 }

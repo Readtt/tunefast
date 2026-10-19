@@ -101,15 +101,27 @@ pub fn print_text(text: &str) {
 }
 
 /// STOP in TOP PROCESSES: ends the listed processes, as the original does.
-pub fn end_processes(pids: &[u32]) {
+/// The list can be a few seconds old, so each process is ended only if it
+/// still runs the executable that was listed (a reused id is left alone).
+pub fn end_processes(pids: &[u32], exes: &[String]) {
     use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
-    for pid in pids {
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
+        TerminateProcess,
+    };
+    for (pid, exe) in pids.iter().zip(exes) {
         unsafe {
-            if let Ok(handle) = OpenProcess(PROCESS_TERMINATE, false, *pid) {
+            let Ok(handle) = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, false, *pid) else {
+                continue;
+            };
+            let mut buffer = [0u16; 1024];
+            let mut length = buffer.len() as u32;
+            let same = QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, windows::core::PWSTR(buffer.as_mut_ptr()), &mut length).is_ok()
+                && String::from_utf16_lossy(&buffer[..length as usize]).eq_ignore_ascii_case(exe);
+            if same {
                 let _ = TerminateProcess(handle, 1);
-                let _ = CloseHandle(handle);
             }
+            let _ = CloseHandle(handle);
         }
     }
 }
@@ -626,7 +638,7 @@ impl ProcessSampler {
         );
         let cores = self.system.cpus().len().max(1) as f32;
         let cores = if cores <= 1.0 { std::thread::available_parallelism().map(|n| n.get() as f32).unwrap_or(1.0) } else { cores };
-        let mut groups: HashMap<String, (f32, f64, u64, Vec<u32>)> = HashMap::new();
+        let mut groups: HashMap<String, (f32, f64, u64, Vec<u32>, Vec<String>)> = HashMap::new();
         for (pid, process) in self.system.processes() {
             let pid = pid.as_u32();
             if pid == self.own || pid <= 4 {
@@ -637,15 +649,16 @@ impl ProcessSampler {
                 continue; // system processes, not apps
             }
             let name = self.names.entry(exe.to_path_buf()).or_insert_with(|| describe(exe)).clone();
-            let entry = groups.entry(name).or_insert((0.0, 0.0, 0, Vec::new()));
+            let entry = groups.entry(name).or_insert((0.0, 0.0, 0, Vec::new(), Vec::new()));
             entry.0 += process.cpu_usage() / cores;
             entry.1 = entry.1.max(gpu.get(&pid).copied().unwrap_or(0.0));
             entry.2 += process.memory();
             entry.3.push(pid);
+            entry.4.push(exe.to_string_lossy().into_owned());
         }
         let mut rows: Vec<Process> = groups
             .into_iter()
-            .map(|(name, (cpu, gpu, memory, pids))| Process { name, cpu: cpu.round() as u32, gpu: gpu.round() as u32, ram_mb: (memory / 1_048_576) as u32, pids })
+            .map(|(name, (cpu, gpu, memory, pids, exes))| Process { name, cpu: cpu.round() as u32, gpu: gpu.round() as u32, ram_mb: (memory / 1_048_576) as u32, pids, exes })
             .collect();
         rows.sort_by(|a, b| b.cpu.cmp(&a.cpu).then(b.gpu.cmp(&a.gpu)).then(b.ram_mb.cmp(&a.ram_mb)));
         rows.truncate(4);

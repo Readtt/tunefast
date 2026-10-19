@@ -57,8 +57,8 @@ pub enum Message {
     CopySysinfo,
     PrintSysinfo,
     OpenTaskManager,
-    /// STOP on a TOP PROCESSES row: end that app's processes.
-    EndProcesses(Vec<u32>),
+    /// STOP on a TOP PROCESSES row: end that app's processes (ids, executables).
+    EndProcesses(Vec<u32>, Vec<String>),
     EnableHelper,
     Reading(Box<Reading>),
     SysInfo(Box<SysInfo>),
@@ -247,10 +247,10 @@ impl App {
                 );
             }
             Message::OpenTaskManager => crate::hw::open_task_manager(),
-            Message::EndProcesses(pids) => {
+            Message::EndProcesses(pids, exes) => {
                 if self.live && !pids.is_empty() {
                     self.store.vitals.processes.retain(|p| p.pids != pids);
-                    return Task::perform(tokio::task::spawn_blocking(move || crate::hw::end_processes(&pids)), |_| Message::Saved(Ok(())));
+                    return Task::perform(tokio::task::spawn_blocking(move || crate::hw::end_processes(&pids, &exes)), |_| Message::Saved(Ok(())));
                 }
             }
             Message::EnableHelper => {

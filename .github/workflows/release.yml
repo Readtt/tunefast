@@ -39,6 +39,10 @@ jobs:
           version=${GITHUB_REF_NAME#v}
           mkdir -p dist/pkg
           cp "target/release/${name}${{ matrix.exe }}" README.md LICENSE dist/pkg/
+          # Hardware control needs the helper service next to the app (Windows only).
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/release/tunefast-helper.exe" dist/pkg/
+          fi
           cd dist/pkg
           if [ "${{ runner.os }}" = "Windows" ]; then
             7z a "../${name}-${version}-${{ matrix.name }}.zip" . > /dev/null
