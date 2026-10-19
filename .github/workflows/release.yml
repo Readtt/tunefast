@@ -35,7 +35,8 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          name=$(cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys; print(json.load(sys.stdin)['packages'][0]['name'])")
+          # The app is the workspace root package (tunefast-core and tunefast-helper are members).
+          name=tunefast
           version=${GITHUB_REF_NAME#v}
           mkdir -p dist/pkg
           cp "target/release/${name}${{ matrix.exe }}" README.md LICENSE dist/pkg/
