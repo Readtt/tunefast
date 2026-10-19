@@ -1,0 +1,59 @@
+name: Release
+
+# Push a tag like v0.1.0 to build every platform and attach the downloads to
+# the GitHub release of that tag (created if it does not exist yet).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x64, os: windows-latest, exe: .exe }
+          - { name: macos-arm64, os: macos-latest, exe: "" }
+          - { name: linux-x64, os: ubuntu-latest, exe: "" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked
+      - name: Package
+        shell: bash
+        run: |
+          name=$(cargo metadata --no-deps --format-version 1 | python3 -c "import json,sys; print(json.load(sys.stdin)['packages'][0]['name'])")
+          version=${GITHUB_REF_NAME#v}
+          mkdir -p dist/pkg
+          cp "target/release/${name}${{ matrix.exe }}" README.md LICENSE dist/pkg/
+          cd dist/pkg
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "../${name}-${version}-${{ matrix.name }}.zip" . > /dev/null
+          else
+            tar -czf "../${name}-${version}-${{ matrix.name }}.tar.gz" .
+          fi
+      - name: Attach to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # The release normally exists already (tools/release.py creates it with
+        # notes and the local Windows build); --clobber replaces that zip with
+        # this clean CI build of the same name.
+        run: |
+          shopt -s nullglob
+          files=(dist/*.zip dist/*.tar.gz)
+          gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes "Automated build." || true
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber

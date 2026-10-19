@@ -1,0 +1,5 @@
+# fastframe needs Rust 1.98. Pinning keeps local builds and CI on the same
+# compiler, clippy and rustfmt.
+[toolchain]
+channel = "1.98.0"
+components = ["rustfmt", "clippy"]

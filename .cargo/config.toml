@@ -1,0 +1,7 @@
+# Windows downloads are standalone: keep the MSVC runtime inside the
+# executable so the zip runs on a clean machine.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
